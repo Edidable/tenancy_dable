@@ -46,11 +46,12 @@ Gem::Specification.new do |spec|
   spec.add_dependency "pundit", ">= 2.3"
 
   # --- Runtime: row-scoping engine ---------------------------------------
-  # DECISION PENDING (see .midgal plan, Phase 00): the scoping engine is
-  # either self-contained in this gem (default — full control, no upstream
-  # bus-factor) OR delegated to acts_as_tenant. Uncomment to delegate:
-  #
-  # spec.add_dependency "acts_as_tenant", ">= 1.0"
+  # DECIDED (see .midgal/PLAN.md): the scoping engine is SELF-CONTAINED in this
+  # gem — fail-closed default scope, immutable tenant_id, bulk-write guard,
+  # ActiveJob propagation, and an optional Postgres RLS hook all live here. We
+  # deliberately do NOT depend on acts_as_tenant / rails-tenantify; their
+  # patterns are referenced, not imported, so this foundation owns its own
+  # security boundary with no third-party bus-factor.
 
   # --- Development --------------------------------------------------------
   spec.add_development_dependency "rspec", "~> 3.13"
