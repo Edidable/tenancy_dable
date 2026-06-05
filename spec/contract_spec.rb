@@ -2,6 +2,7 @@
 
 require "rails_helper"
 require "tenancy_dable/job" # opt-in seam, not auto-required at boot
+require "tenancy_dable/channel" # opt-in seam (v0.3.0), not auto-required at boot
 
 # Contract lock (Phase 15 hardening). `tenancy_dable`'s whole premise is a FROZEN
 # public surface that derived edidable projects inherit and bump via `bundle
@@ -190,6 +191,30 @@ RSpec.describe "Frozen public contract (PLAN.md)" do
         lib/generators/tenancy_dable/install/install_generator.rb
         lib/generators/tenancy_dable/model/model_generator.rb
       ].each { |path| expect(File).to exist(path) }
+    end
+  end
+
+  # v0.3.0 additive: TenancyDable::Channel — the opt-in Action Cable concern, the
+  # Cable parallel to Controller::Resolvable (§14.1). Like the Job seam it is NOT
+  # auto-required (Action Cable stays optional), so it's required at the top of
+  # this file. Locked here as part of the frozen surface: a concern exposing the
+  # six FROZEN helper names a host channel inherits by including it. Locked by
+  # responds-to (instance methods on the module), mirroring the Job lock — NOT an
+  # exhaustive public-method match, so the necessarily-public #perform_action
+  # wrapper (which Action Cable dispatches via an explicit receiver) is
+  # intentionally absent from the frozen six. No new error class, no new setting.
+  describe "TenancyDable::Channel seam (§14.1) — opt-in Action Cable concern" do
+    it "defines TenancyDable::Channel as a concern" do
+      expect(TenancyDable::Channel).to be_a(ActiveSupport::Concern)
+    end
+
+    %i[
+      current_tenant current_membership tenant_member?
+      reject_unless_member! stream_for_tenant with_tenant_context
+    ].each do |helper|
+      it "exposes ##{helper}" do
+        expect(TenancyDable::Channel.instance_methods).to include(helper)
+      end
     end
   end
 end

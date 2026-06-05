@@ -11,11 +11,23 @@ require "spec_helper" # also `require "tenancy_dable"`, so any future Railtie is
 require "combustion"
 require "factory_bot"
 
+# Opt-in Cable concern (v0.3.0): like a host that runs channels, the harness
+# requires it EXPLICITLY — the gem entry point does not (Action Cable is an
+# OPTIONAL dependency). Required BEFORE `Combustion.initialize!` because
+# `config.eager_load` (below) loads the harness's channel classes at boot, and
+# `TenantChannel` mixes this in at class-definition time. The concern names no
+# Action Cable constant at load, so requiring it before Action Cable is safe.
+require "tenancy_dable/channel"
+
 # Frameworks the harness boots: ActiveRecord backs the scoping/identity specs;
-# ActionController backs the slug-resolution specs (Phases 05/10). The block is
-# Combustion's `setup_environment` hook — application-level config goes here
-# (Combustion owns the Rails::Application; see spec/internal/config/application.rb).
-Combustion.initialize! :active_record, :action_controller do
+# ActionController backs the slug-resolution specs (Phases 05/10); ActionCable
+# backs the channel specs (v0.3.0 phase 03 — Combustion maps `:action_cable` to
+# `action_cable/engine`). ActionCable must load before `require "rspec/rails"`
+# below, so rspec-rails registers `type: :channel` (its ChannelExampleGroup is
+# gated on `defined?(::ActionCable)`). The block is Combustion's
+# `setup_environment` hook — application-level config goes here (Combustion owns
+# the Rails::Application; see spec/internal/config/application.rb).
+Combustion.initialize! :active_record, :action_controller, :action_cable do
   # Eager-load the host app at boot so every model that mixes in a TenancyDable
   # concern is loaded ONCE, up front, against the DEFAULT configuration — exactly
   # as a real host loads its models AFTER its initializer sets `config.roles`

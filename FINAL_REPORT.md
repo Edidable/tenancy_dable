@@ -225,3 +225,76 @@ and the `rescue_from TenancyDable::NotAMemberError` / `on_not_a_member = :not_au
 guidance for non-members (Fix B; messages are English — localize in the rescue).
 `CHANGELOG.md` carries the dated `[0.2.0]` entry. As with the v0.1.0 build, the work
 is **uncommitted** pending the maintainer's commit/tag (`v0.2.0`).
+
+---
+
+## v0.3.0 addendum (Action Cable + Job membership) — 2026-06-05
+
+A lean 6-phase follow-up that makes the gem first-class with **Action Cable** and
+closes the one gem-side **ActiveJob caveat** — two **additive** features → a MINOR
+bump `TenancyDable::VERSION` `0.2.0` → **`0.3.0`**. Default behavior is unchanged, so
+no host breaks; the frozen public surface holds except as recorded in
+[DESIGN.md §14](DESIGN.md). The error hierarchy stays at **8 classes** and config
+settings stay at **14** — the Channel concern reuses `slug_param` and adds no
+setting, no error class. Work landed on branch `feat/v0.3.0-action-cable`.
+
+**Suite: `bundle exec rspec` green — 285 examples, 0 failures** (was 260 at v0.2.0;
+**+25** across the v0.3.0 run):
+
+| Feature | Change | New/changed spec | Δ examples |
+|---|---|---|---:|
+| **Action Cable** | New opt-in `TenancyDable::Channel` (`lib/tenancy_dable/channel.rb`) — the Cable parallel to `Controller::Resolvable`: resolves the tenant **by slug** per subscription (invariant 5), enforces membership (`reject_unless_member!`), streams tenant-namespaced names (`stream_for_tenant` → `"tenant:<id>"`), and auto-scopes **every** channel action by wrapping `perform_action`. **Not** auto-required (Action Cable stays optional); the gem does **not** own Cable auth — the host's `ApplicationCable::Connection` declares `identified_by :current_user` and the concern only *reads* it. | `spec/channels/tenant_channel_spec.rb` (new, `type: :channel`) + the Cable harness (Combustion boots `:action_cable`; connection/channel fixtures + `cable.yml` under `spec/internal/`) | +8 |
+| **Job membership** | `TenancyDable::Job` now carries the acting **membership** alongside the tenant: a second namespaced payload key (`SERIALIZED_MEMBERSHIP_KEY = "tenancy_dable_membership_id"`) is serialized at enqueue and `current_membership` is restored for `perform` — set **inside** the existing `with_tenant` block, so its `ensure` tears tenant **and** membership down together (no leak). Backward compatible: an older payload restores a nil membership; tenant propagation byte-for-byte unchanged. | `spec/integration/active_job_propagation_spec.rb` (6 → 10) + job-membership unit/contract coverage | +10 |
+| **Contract lock** | `spec/contract_spec.rb` adds `TenancyDable::Channel` to the frozen surface — a concern exposing the six frozen helpers (`current_tenant`, `current_membership`, `tenant_member?`, `reject_unless_member!`, `stream_for_tenant`, `with_tenant_context`), locked by responds-to (mirroring the `Job` seam lock). The necessarily-public `#perform_action` wrapper is intentionally **not** in the frozen six. Error count (8) and settings count (14) re-asserted unchanged. | `spec/contract_spec.rb` (63 → 70) | +7 |
+
+**A cross-phase correctness note (Action Cable dispatch):** `Channel#perform_action`
+**must be public.** Action Cable dispatches actions through an *explicit receiver*
+(`subscription.perform_action(data)` — both at runtime via
+`ActionCable::Connection::Subscriptions` and in the channel `TestCase`), so a private
+override raises `NoMethodError` and breaks **all** channel dispatch. The shipped
+concern keeps it public (with a comment explaining why); `DESIGN.md §14.1` — which
+had shown it under `private` and noted phase 02 "may keep it private" — was
+reconciled to the now-real public method in the docs phase. It is **not** part of the
+frozen surface (the six helpers are), so the contract lock is unaffected.
+
+`CHANGELOG.md` carries the dated `[0.3.0]` entry (Added: `Channel`; Changed: `Job`
+carries membership); `README.md` gains an "Action Cable tenant resolution" section
+and a membership note on the ActiveJob section; `UPGRADING.md` gains the Channel
+adoption note (gem does not own connection auth) and the Job-membership behavior
+change. The critic phase (below) commits the verified changeset to
+`feat/v0.3.0-action-cable`; the release **tag** (`v0.3.0`), push, and publish remain
+the maintainer's step.
+
+### Critic / verify (phase 05) — final adversarial gate
+
+Final skeptical pass: prove both features and the **absence** of regressions, then
+land the changeset. `bundle exec rake` (RSpec + Standard) is **green — 286 examples,
+0 failures, 0 Standard offenses**, order-independent across seeds (1 / 12345 /
+random). The count is **+1** over the phase-04 addendum's 285: the critic added one
+adversarial channel example (slug-only proven end-to-end on the Cable path, below).
+
+**Per-feature proof (adversarial):**
+
+| Claim under attack | Proof |
+|---|---|
+| **Cable — member subscribes, streams `tenant:<id>`** | `spec/channels` — confirmed subscription + `have_stream_from("tenant:#{tenant.id}")` (id-namespaced, never keyed off the slug). |
+| **Cable — non-member / member-of-B / unknown slug / absent slug all rejected** | Four reject cases; a member of tenant B (even as *owner*) is rejected reaching A's slug — no nil tenant ⇒ no membership ⇒ `reject`. |
+| **Cable — slug-only (invariant 5) on the channel path** | **New** case: a tenant's own member, subscribing with its numeric **id** in the slug slot, is **rejected** (`find_by(slug:)` never matches an id). The Cable parallel to `spec/resolution/slug_only_spec.rb`. |
+| **Cable — action is tenant-scoped, no context leak** | `perform :widget_count` sees A's 2 rows (table holds 3 incl. B's); inside-action `current_tenant == tenant_a`; after dispatch `current_tenant`/`current_membership` both nil (auto-`perform_action` wrap + `with_tenant` ensure). |
+| **Job — `perform` restores tenant AND membership; no leak; backward-compatible** | `spec/integration/active_job_propagation_spec.rb` — restores both from the payload; membership-less (pre-v0.3.0) payload restores nil membership with tenant unchanged; nothing set after `execute`. Tenant-only propagation (capture → restore → scoped read → fail-open nil) still passes. |
+
+**Guardrails held (re-verified):**
+- **No host/skeleton file touched** — the repo root *is* the gem; `git status` shows only `lib/`, `spec/`, and gem docs. No reference to the host app (`ror_saas_multitenant_test`, its `Current`, `Agents::RunJob`, or its `TenantChannel`) in shipped code — the only "skeleton" hits in `lib/` are descriptive comments.
+- **Gem does not own Cable auth** — `Channel` reads `current_user` only; no cookie/session/token/`request`/`env` parsing (the sole "cookie/session" mention is a comment explaining the *host's* job). Ships no `Connection` auth concern.
+- **Inherent Job seams unchanged** — tenant captured at *enqueue* (`serialize`); a *deleted* tenant reloads to nil via `find_by(id:)` ⇒ `with_tenant(nil)` (fail-open). The membership extends the same seam symmetrically (deleted membership ⇒ nil), inside the same `with_tenant` block.
+
+**Six security invariants — no regression:** `spec/security/red_team_spec.rb` green (9
+examples); invariant 5 (slug-only) now additionally proven **on the new Channel path**
+end-to-end.
+
+**Contract consistency:** `spec/contract_spec.rb` includes `TenancyDable::Channel`
+(six frozen helpers, responds-to lock); error hierarchy **8** classes; settings **14**;
+`VERSION = "0.3.0"` (`version.rb`) and dated `[0.3.0]` entry in `CHANGELOG.md`.
+
+**Committed** on `feat/v0.3.0-action-cable` — **not** `master`/`main`. Tag/push/publish
+left to the maintainer.

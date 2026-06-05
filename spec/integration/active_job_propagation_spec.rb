@@ -13,11 +13,12 @@ class IntegrationTenantProbeJob < ActiveJob::Base
   include TenancyDable::Job
 
   class << self
-    attr_accessor :observed_tenant_id, :observed_widget_ids
+    attr_accessor :observed_tenant_id, :observed_membership_id, :observed_widget_ids
   end
 
   def perform
     self.class.observed_tenant_id = TenancyDable.current_tenant&.id
+    self.class.observed_membership_id = TenancyDable.current_membership&.id
     self.class.observed_widget_ids = Widget.order(:id).pluck(:id)
   end
 end
@@ -31,6 +32,8 @@ end
 RSpec.describe "Integration: ActiveJob tenant propagation" do
   let(:tenant_a) { create(:tenant, slug: "alpha") }
   let(:tenant_b) { create(:tenant, slug: "bravo") }
+  let(:user) { create(:user) }
+  let(:membership_a) { create(:membership, user: user, tenant: tenant_a) }
 
   around do |example|
     previous_adapter = ActiveJob::Base.queue_adapter
@@ -45,6 +48,7 @@ RSpec.describe "Integration: ActiveJob tenant propagation" do
 
   before do
     IntegrationTenantProbeJob.observed_tenant_id = nil
+    IntegrationTenantProbeJob.observed_membership_id = nil
     IntegrationTenantProbeJob.observed_widget_ids = nil
   end
 
@@ -106,5 +110,61 @@ RSpec.describe "Integration: ActiveJob tenant propagation" do
     ActiveJob::Base.execute(enqueued.first)
 
     expect(IntegrationTenantProbeJob.observed_tenant_id).to eq(tenant_a.id)
+  end
+
+  # v0.3.0: the membership rides the same payload as the tenant, so a job's
+  # context — workspace AND role — matches the request that enqueued it. The
+  # membership id is captured alongside the tenant id, reloaded by id in the
+  # worker, and set as `current_membership` for `perform`'s duration only.
+  describe "membership propagation" do
+    # Snapshot a job enqueued with BOTH a current tenant and membership — the
+    # state Resolvable establishes for every authenticated request.
+    def enqueue_with_membership
+      TenancyDable.with_tenant(tenant_a) do
+        TenancyDable.current_membership = membership_a
+        IntegrationTenantProbeJob.new.serialize
+      end
+    end
+
+    it "captures the enqueue-time membership id into the serialized payload" do
+      payload = enqueue_with_membership
+
+      expect(payload["tenancy_dable_membership_id"]).to eq(membership_a.id)
+      expect(payload["tenancy_dable_tenant_id"]).to eq(tenant_a.id)
+    end
+
+    it "restores BOTH the tenant and the membership on perform" do
+      payload = enqueue_with_membership
+
+      # Nothing ambient — restoration must come from the payload, not leftovers.
+      expect(TenancyDable.current_tenant).to be_nil
+      expect(TenancyDable.current_membership).to be_nil
+      ActiveJob::Base.execute(payload)
+
+      expect(IntegrationTenantProbeJob.observed_tenant_id).to eq(tenant_a.id)
+      expect(IntegrationTenantProbeJob.observed_membership_id).to eq(membership_a.id)
+    end
+
+    it "leaves no membership set after the job finishes (no cross-job leak)" do
+      payload = enqueue_with_membership
+
+      ActiveJob::Base.execute(payload)
+
+      expect(TenancyDable.current_tenant).to be_nil
+      expect(TenancyDable.current_membership).to be_nil
+    end
+
+    it "restores the tenant but a nil membership for an older payload (no membership key)" do
+      # A pre-v0.3.0 enqueue carries the tenant id but no membership key at all.
+      payload = TenancyDable.with_tenant(tenant_a) { IntegrationTenantProbeJob.new.serialize }
+      payload.delete("tenancy_dable_membership_id")
+      expect(payload).not_to have_key("tenancy_dable_membership_id")
+
+      expect { ActiveJob::Base.execute(payload) }.not_to raise_error
+
+      # Tenant propagation is unchanged; the absent membership restores as nil.
+      expect(IntegrationTenantProbeJob.observed_tenant_id).to eq(tenant_a.id)
+      expect(IntegrationTenantProbeJob.observed_membership_id).to be_nil
+    end
   end
 end

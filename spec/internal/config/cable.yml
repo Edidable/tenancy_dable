@@ -1,0 +1,7 @@
+# Action Cable config for the Combustion harness. The `test` adapter keeps
+# broadcasts in-process; the channel specs use `stub_connection` + the channel
+# TestCase (which stubs `stream_from`), so no pubsub adapter is ever actually
+# connected — this file exists so the harness boots like a real host app and the
+# Action Cable engine has a config to read (it guards on the file's existence).
+test:
+  adapter: test

@@ -31,7 +31,7 @@ Four layers, one dependency:
 - **Rails** ≥ 7.1, < 9 (`activesupport`, `activerecord`, `actionpack`, `railties`)
 - **Pundit** ≥ 2.3
 
-ActiveJob is **optional** — only needed if you opt into [tenant propagation into background jobs](#opt-in-activejob-tenant-propagation).
+ActiveJob and Action Cable are **optional** — needed only if you opt into [tenant propagation into background jobs](#opt-in-activejob-tenant-propagation) or [Action Cable tenant resolution](#opt-in-action-cable-tenant-resolution). Both ship with `rails`, so a host already has them.
 
 ## Installation
 
@@ -246,7 +246,7 @@ The generated `ApplicationPolicy` (from `tenancy_dable:install`) ships a `Contex
 
 ## Opt-in: ActiveJob tenant propagation
 
-A background job should run under the same workspace as the request that enqueued it. The `TenancyDable::Job` concern carries the current tenant's id through the serialized payload and restores it for `perform`.
+A background job should run under the same workspace as the request that enqueued it. The `TenancyDable::Job` concern carries the current tenant's id **and the acting membership's id** through the serialized payload and restores both for `perform` — so a job's context (the workspace *and* the role within it) matches the enqueuing request's, not just the tenant.
 
 It is **not** auto-required (so ActiveJob stays an optional dependency) — wire it up explicitly:
 
@@ -260,13 +260,61 @@ end
 
 ```ruby
 TenancyDable.with_tenant(workspace) do
-  ReportJob.perform_later      # captures workspace.id at enqueue
+  ReportJob.perform_later      # captures workspace.id + current_membership.id at enqueue
 end
-# In the worker, `perform` runs inside TenancyDable.with_tenant(workspace) — reads scope, bulk
-# writes pass the guard, exactly as they would have inline.
+# In the worker, `perform` runs inside TenancyDable.with_tenant(workspace) with current_membership
+# restored — reads scope, bulk writes pass the guard, the role is known, exactly as inline.
 ```
 
-Fail-open by design: a job enqueued with no current tenant performs untouched; if the tenant was deleted before the job runs, `perform` runs under `with_tenant(nil)`.
+Fail-open by design: a job enqueued with no current tenant performs untouched; if the tenant (or membership) was deleted before the job runs, that record reloads to nil — `perform` runs under `with_tenant(nil)` with a nil membership. **Backward compatible:** a payload enqueued before v0.3.0 carries no membership key, so it restores a nil membership; tenant propagation is byte-for-byte unchanged.
+
+## Opt-in: Action Cable tenant resolution
+
+A channel subscription should run under the same workspace as a request does. `TenancyDable::Channel` is the Cable parallel to [`resolve_tenant!`](#3-slug-resolution): it resolves the tenant **by slug** from the subscription params, enforces membership, and runs every channel action inside the tenant context — so a channel's reads scope and its bulk writes pass the guard exactly like a controller action's.
+
+Like `Job`, it is **not** auto-required (so Action Cable stays an optional dependency) — wire it up explicitly:
+
+```ruby
+require "tenancy_dable/channel"   # in an initializer, or atop application_cable/channel.rb
+
+class TenantChannel < ApplicationCable::Channel
+  include TenancyDable::Channel
+
+  def subscribed
+    reject_unless_member!   # reject unless current_user is a member of the resolved tenant
+    stream_for_tenant       # stream from "tenant:<id>" — never a cross-tenant stream name
+  end
+
+  # Every client-invoked action runs inside TenancyDable.with_tenant(current_tenant) with
+  # current_membership set, so its reads are tenant-scoped automatically.
+  def stats
+    transmit(open: Invoice.where(state: "open").count)   # scoped to current_tenant
+  end
+end
+```
+
+**The gem does not own Cable authentication.** Connection-level user identification stays the host's job — your `ApplicationCable::Connection` must `identified_by :current_user` and establish it however you authenticate (cookie/session/token). Action Cable exposes `current_user` as a reader on the channel; the concern only *reads* it, never establishes it. That one line is the entire requirement — the gem ships no auth code.
+
+```ruby
+# app/channels/application_cable/connection.rb
+module ApplicationCable
+  class Connection < ActionCable::Connection::Base
+    identified_by :current_user   # authenticate however you like; the concern reads it
+  end
+end
+```
+
+The frozen helpers a channel inherits:
+
+| Helper | What it does |
+|---|---|
+| `current_tenant` / `current_membership` | Memoized, **slug-resolved** tenant + the acting user's membership in it (or nil). |
+| `tenant_member?` | Whether `current_user` is a member of `current_tenant`. |
+| `reject_unless_member!` | Call in `#subscribed`: `reject` the subscription unless the user is a member. |
+| `stream_for_tenant(suffix = nil)` | `stream_from "tenant:<id>"` (+ `":<suffix>"`) — tenant-namespaced, never cross-tenant. |
+| `with_tenant_context(&blk)` | Run a block inside the resolved tenant context — for DB reads in `#subscribed`, where there is no auto-wrap. |
+
+All are **safe when no tenant resolves** (slug absent or unknown): the membership is nil, so `reject_unless_member!` rejects the subscription (the secure outcome). Resolution is **slug-only** ([invariant 5](#security-invariants)) — it never trusts a tenant id from the params.
 
 ## Generating tenant-scoped models
 

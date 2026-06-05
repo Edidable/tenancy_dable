@@ -269,7 +269,35 @@ class ApplicationJob < ActiveJob::Base
 end
 ```
 
-**8. Run your suite.** Your app's tests are the acceptance gate. Pay attention to
+As of v0.3.0 the seam also carries the acting **membership** (not just the tenant),
+so `current_membership` inside `perform` matches the enqueuing request's — delete any
+hand-rolled role-threading too. It is backward compatible: a payload enqueued before
+v0.3.0 simply restores a nil membership.
+
+**8. (Optional) Action Cable channels.** If you run channels, opt into
+`TenancyDable::Channel` — the Cable parallel to `resolve_tenant!`. It resolves the
+tenant by slug per subscription, enforces membership, and runs each channel action
+inside the tenant context:
+
+```ruby
+require "tenancy_dable/channel"   # opt-in, like Job — Action Cable stays optional
+
+class TenantChannel < ApplicationCable::Channel
+  include TenancyDable::Channel
+  def subscribed
+    reject_unless_member!   # reject a non-member (or an unknown/absent slug)
+    stream_for_tenant       # "tenant:<id>" — tenant-namespaced, never cross-tenant
+  end
+end
+```
+
+**The gem does not own Cable connection auth** (the same guardrail as the rest of the
+stack: it never touches your authentication). Connection-level user identification
+stays your job — your `ApplicationCable::Connection` must `identified_by :current_user`
+(establish it however you authenticate). The concern only *reads* `current_user` off
+the connection. That one line is the whole requirement; the gem ships no auth code.
+
+**9. Run your suite.** Your app's tests are the acceptance gate. Pay attention to
 the behavior differences below.
 
 ### What stays untouched
@@ -296,6 +324,11 @@ the behavior differences below.
   `Pundit::NotAuthorizedError` / your callable's outcome — see `on_not_a_member` in
   step 5); an unknown slug raises `ActiveRecord::RecordNotFound` (or returns a null
   tenant with `on_tenant_not_found = :null`).
+- **Jobs now restore the membership too (v0.3.0).** `TenancyDable::Job` previously
+  left `current_membership` nil inside `perform` (it carried only the tenant); it now
+  restores the enqueue-time membership as well. A job that read `current_membership`
+  and relied on it being nil should be reviewed. Backward compatible the other way:
+  payloads enqueued before v0.3.0 (no membership key) restore a nil membership.
 - **A role literally named `manager` is a foot-gun.** The membership generates a
   `manager?` predicate from `config.roles` (role == `"manager"`), while
   `Membership#manager?` / the policy `manager?` mean "role ∈ `manager_roles`." If

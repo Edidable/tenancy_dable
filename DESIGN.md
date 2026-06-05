@@ -38,11 +38,13 @@ that implements it. **Names here match `PLAN.md` exactly.**
 | `TenancyDable::Generators::InstallGenerator` (`tenancy_dable:install`) | `lib/generators/tenancy_dable/install/install_generator.rb` (+ `templates/`) | 07 |
 | `TenancyDable::Generators::ModelGenerator` (`tenancy_dable:model`) | `lib/generators/tenancy_dable/model/model_generator.rb` (+ `templates/`) | 07 |
 
-Additive seams reserved by this design (beyond the frozen file list — see §10):
+Additive seams reserved by this design (beyond the frozen file list — see §10,
+and the v0.3.0 additions in §14):
 
 | Symbol | File | Implemented in |
 |---|---|---|
-| `TenancyDable::Job` (ActiveJob tenant propagation) | `lib/tenancy_dable/job.rb` | 13 |
+| `TenancyDable::Job` (ActiveJob tenant propagation; also carries membership in v0.3.0 — §14.2) | `lib/tenancy_dable/job.rb` | 13 (membership: v0.3.0 phase 01) |
+| `TenancyDable::Channel` (Action Cable tenant resolution, opt-in — §14.1) | `lib/tenancy_dable/channel.rb` | v0.3.0 phase 02 |
 
 ---
 
@@ -655,3 +657,194 @@ by `rspec spec/scoping`.
 - Frozen `TenancyDable` facade / `Scoped` / `Resolvable` / policy signatures:
   **unchanged**.
 - No default that affects isolation changes; security invariants (§11) hold as-is.
+
+---
+
+## 14. v0.3.0 delta — Action Cable + Job membership (additive — frozen for this run)
+
+> Authoritative for this run: [`.midgal/V03_PLAN.md`](.midgal/V03_PLAN.md). The
+> v0.1.0 surface (§1–§12) and the v0.2.0 delta (§13) stay frozen **except** as
+> amended here. Both additions are **additive**: no frozen signature, no default,
+> the **8-error count**, and the **14-setting count** are unchanged; the §11
+> security invariants hold as-is (and invariant 5 — slug-only resolution — now
+> also governs the Cable layer). This phase (v0.3.0 phase 00) writes no `lib/`
+> code; it records the contract delta the later phases implement against.
+
+**Scope guardrails (from V03_PLAN).** This run changes ONLY the `tenancy_dable`
+gem — no host/skeleton adaptation. The gem does **not** own Cable authentication:
+connection-level user identification stays the host's job (`identified_by
+:current_user`); the gem ships no `Connection` concern and no cookie/session
+parsing. The inherent, documented Job seams (enqueue-time capture; deleted-tenant
+fail-open/closed) are correct and stay — v0.3.0 only extends them to carry
+membership symmetrically.
+
+**Version target:** `TenancyDable::VERSION` `0.2.0` → **`0.3.0`** (two additive
+features = MINOR; default behavior unchanged, so no host breaks). No gemspec
+runtime change: Action Cable, like ActiveJob, is an **optional, opt-in**
+dependency — `rails` (a dev dep) already provides `actioncable` for the harness,
+and a host gets it via `rails`. The bump lands in v0.3.0 phase 04; this phase only
+records the target.
+
+### 14.1 `TenancyDable::Channel` — `lib/tenancy_dable/channel.rb` (opt-in, v0.3.0 phase 02)
+
+The Action Cable parallel to `Controller::Resolvable` (§9.1): it resolves the
+tenant **per subscription, by slug**, enforces membership, and runs channel
+actions inside the tenant context — so a channel's reads scope and its writes pass
+the bulk-write guard exactly like a controller action's.
+
+**Opt-in, like `Job` (§10-I).** This file is deliberately **not** required by the
+gem entry point — a host that runs channels does `require "tenancy_dable/channel"`
+— so Action Cable stays an OPTIONAL dependency. The including class must be an
+`ActionCable::Channel::Base` subclass (it provides `params`, `stream_from`,
+`reject`, and `perform_action`).
+
+**The gem does NOT own Cable auth (guardrail).** Connection-level user
+identification is the host's job: its `ApplicationCable::Connection` declares
+`identified_by :current_user` and establishes it however it authenticates
+(cookie/session/token). Action Cable exposes each `identified_by` attribute as a
+delegated reader on the channel, so the concern simply **reads** `current_user`
+off the connection — it never establishes it. One host line (`identified_by
+:current_user`) is the entire requirement; the gem ships no auth code.
+
+```ruby
+module TenancyDable::Channel
+  extend ActiveSupport::Concern
+
+  # Resolve the tenant for THIS subscription by SLUG from the subscription params
+  # (invariant 5 — never an id). Memoized for the subscription's lifetime; nil
+  # when the slug param is absent or matches no tenant.
+  def current_tenant
+    #=> @_tenancy_dable_tenant ||= TenancyDable.configuration.tenant_class
+    #        .find_by(slug: params[TenancyDable.configuration.slug_param])
+  end
+
+  # The acting user's membership in current_tenant, or nil. `current_user` comes
+  # from the connection's `identified_by :current_user` (host-owned auth).
+  def current_membership   #=> current_user&.membership_for(current_tenant)
+
+  def tenant_member?       #=> current_membership.present?
+
+  # Cable parallel to Resolvable's membership enforcement — call in #subscribed:
+  # rejects the subscription unless the acting user is a member of current_tenant.
+  def reject_unless_member!   #=> reject unless tenant_member?
+
+  # Tenant-namespaced stream name (no cross-tenant stream): "tenant:<id>"
+  # (+ ":<suffix>" when given). Call AFTER membership is confirmed.
+  def stream_for_tenant(suffix = nil)   #=> stream_from "tenant:#{current_tenant.id}[:suffix]"
+
+  # Run a block inside the resolved tenant context (tenant + membership both set),
+  # for DB reads in #subscribed where there is no auto-wrap. The tenant + the
+  # prior membership are restored on exit by with_tenant's ensure (§3).
+  def with_tenant_context(&blk)
+    #=> TenancyDable.with_tenant(current_tenant) {
+    #        TenancyDable.current_membership = current_membership; blk.call }
+  end
+
+  # AUTO CONTEXT: every incoming channel action runs inside the tenant context.
+  # Action Cable routes each client-invoked action method through #perform_action;
+  # wrapping it (super inside with_tenant_context) makes action handlers
+  # tenant-scoped exactly like controller actions — without each action method
+  # having to remember to wrap itself. MUST stay PUBLIC (Action Cable dispatches
+  # actions via an EXPLICIT receiver — subscription.perform_action(data) — so a
+  # private override raises NoMethodError and breaks dispatch); it is NOT part of
+  # the frozen surface (the six helpers above are).
+  def perform_action(data)
+    with_tenant_context { super }
+  end
+end
+```
+
+**Public surface (FROZEN names):** `current_tenant`, `current_membership`,
+`tenant_member?`, `reject_unless_member!`, `stream_for_tenant`,
+`with_tenant_context`. `#perform_action` is necessarily **public** — Action Cable
+dispatches actions via an explicit receiver (`subscription.perform_action(data)`),
+so a private override would raise `NoMethodError` and break dispatch — but it is
+**not** part of the frozen surface; the six helpers above are what
+`spec/contract_spec.rb` locks (responds-to), mirroring the `Job` seam lock
+(§ contract spec). The memo ivars (`@_tenancy_dable_tenant` /
+`@_tenancy_dable_membership`) are private instance state.
+
+**Slug-only (invariant 5):** resolution reads `params[config.slug_param]` from the
+subscription and calls `find_by(slug:)` — it never reads or trusts a tenant **id**
+from the params. Cable resolution uses the non-bang `find_by` (nil-on-miss),
+because a channel `reject`s rather than raising `RecordNotFound`; the
+controller-only `on_tenant_not_found` setting is **not** consulted here (so no new
+setting — count stays 14).
+
+**Safe when no tenant resolves (fail-safe by design):**
+- nil tenant ⇒ `current_membership` is nil ⇒ `tenant_member?` is false ⇒
+  `reject_unless_member!` rejects the subscription (the secure outcome).
+- `with_tenant_context` / the `perform_action` wrap with a nil tenant delegate to
+  `TenancyDable.with_tenant(nil)` — unscoped/fail-open by default, or fail-closed
+  under `require_tenant`, identical to every other entry point. A correctly-written
+  channel calls `reject_unless_member!` in `#subscribed`, so an unauthorized
+  subscription never reaches an action.
+- `stream_for_tenant` is meant to be called only after membership is confirmed, so
+  `current_tenant` is present when it streams.
+
+Typical host usage (documented in phase 04 README; **not** shipped by the gem):
+
+```ruby
+# app/channels/application_cable/connection.rb — host-owned auth (the one requirement)
+identified_by :current_user
+
+# a host channel
+class TenantChannel < ApplicationCable::Channel
+  include TenancyDable::Channel
+  def subscribed
+    reject_unless_member!   # enforce membership (rejects when nil/unknown tenant)
+    stream_for_tenant       # "tenant:<id>"
+  end
+  # every client-invoked action method below auto-runs inside the tenant context
+end
+```
+
+### 14.2 `TenancyDable::Job` carries membership — `lib/tenancy_dable/job.rb` (v0.3.0 phase 01)
+
+v0.1.0's `Job` (§10-I) propagates only the **tenant** across the enqueue→perform
+boundary, so `current_membership` is `nil` inside `perform`. v0.3.0 carries the
+**membership** too, so a job's context matches that of the request which enqueued
+it (a job can ask "what role is the acting member?" the same way a controller can).
+
+- A second namespaced payload key, `SERIALIZED_MEMBERSHIP_KEY =
+  "tenancy_dable_membership_id"`, travels alongside the existing
+  `SERIALIZED_TENANT_KEY` (`"tenancy_dable_tenant_id"`). `serialize` snapshots
+  `TenancyDable.current_membership&.id`; `deserialize` reads it back out.
+- `around_perform` reloads it (`config.membership_class.find_by(id:)`) and sets
+  `TenancyDable.current_membership` for the duration of `perform` — set **inside
+  the existing `with_tenant` block**. Because `with_tenant` captures and restores
+  `previous_membership` in its `ensure` (§3, `lib/tenancy_dable.rb`), the whole
+  context (tenant **and** membership) is torn back down after `perform`, so a
+  pooled worker thread never leaks one job's membership into the next.
+- **Backward compatible:** a payload enqueued by an older build (no membership
+  key) restores a `nil` membership; tenant propagation is byte-for-byte unchanged.
+
+**Inherent Job seams stay as-is — NOT caveats to "fix" (guardrail):**
+- **Enqueue-time capture:** the tenant (and now membership) id is snapshotted at
+  *enqueue*; if it changes before the worker runs, the job uses the enqueue-time
+  value. Correct, and unchanged.
+- **Deleted tenant / membership:** a since-deleted record reloads to `nil`, so the
+  job performs under `with_tenant(nil)` (fail-open by default, fail-closed under
+  `require_tenant`). Membership now follows the same rule, symmetrically.
+
+`SERIALIZED_MEMBERSHIP_KEY` and the `current_membership` restore are additive; the
+`Job` concern's existing surface (`SERIALIZED_TENANT_KEY`,
+`tenancy_dable_tenant_id`, `serialize` / `deserialize`, the `around_perform`) is
+unchanged.
+
+### 14.3 Contract impact summary
+- New opt-in concern `TenancyDable::Channel` (the six frozen helpers in §14.1) at
+  `lib/tenancy_dable/channel.rb` — additive; **not** auto-required; added to the §1
+  additive-seams inventory and to `spec/contract_spec.rb`'s locked surface
+  (responds-to the six helpers, like the `Job` seam).
+- `TenancyDable::Job` gains `SERIALIZED_MEMBERSHIP_KEY` and restores
+  `current_membership`; existing tenant propagation unchanged.
+- **Error count stays 8; settings count stays 14** — no new error class, no new
+  config setting (Channel reuses `slug_param`; its resolution behavior is fixed,
+  not configurable). Frozen `TenancyDable` facade / `Current` / `Scoped` /
+  `Resolvable` / policy signatures: **unchanged**.
+- `TenancyDable::VERSION` → **`0.3.0`** (additive; bumped in phase 04).
+- Action Cable is an OPTIONAL, opt-in dependency (like ActiveJob) — no gemspec
+  runtime change; `rails` already provides `actioncable` for the harness.
+- Security: invariant 5 (slug-only) now also governs Cable resolution; no default
+  affecting tenant isolation changes; the §11 invariants hold as-is.

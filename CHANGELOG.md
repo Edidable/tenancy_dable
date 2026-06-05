@@ -11,6 +11,48 @@ derived edidable projects, see [UPGRADING.md](UPGRADING.md).
 
 _Nothing yet._
 
+## [0.3.0] - 2026-06-05
+
+Two **additive** features that make the gem first-class with Action Cable and close
+the one gem-side ActiveJob caveat. Default behavior is unchanged, so no host breaks;
+the frozen public surface holds except as recorded in [DESIGN.md §14](DESIGN.md#14-v030-delta--action-cable--job-membership-additive--frozen-for-this-run).
+Error hierarchy stays at **8 classes** and config settings stay at **14** (the
+Channel concern reuses `slug_param` and adds no setting). Because this is a
+`0.MINOR` bump, `~> 0.2.0` pins will **not** pick it up automatically (review by
+hand — see [UPGRADING.md](UPGRADING.md#pre-10-caveat)).
+
+### Added
+
+- **`TenancyDable::Channel`** — an opt-in Action Cable concern, the Cable parallel
+  to `Controller::Resolvable`. Included into an `ActionCable::Channel::Base`
+  subclass, it resolves the workspace **by slug** from the subscription params
+  (invariant 5 — never an id), enforces membership (`reject_unless_member!` in
+  `#subscribed`), streams from tenant-namespaced names (`stream_for_tenant` →
+  `"tenant:<id>"`), and runs **every** channel action inside the tenant context by
+  wrapping `perform_action` — so a channel's reads scope and its bulk writes pass
+  the guard exactly like a controller action's. Frozen helpers: `current_tenant`,
+  `current_membership`, `tenant_member?`, `reject_unless_member!`,
+  `stream_for_tenant`, `with_tenant_context`. **Not auto-required** (Action Cable
+  stays an optional dependency) — `require "tenancy_dable/channel"`. **The gem does
+  not own Cable auth:** the host's `ApplicationCable::Connection` declares
+  `identified_by :current_user`; the concern only *reads* it. No new config setting
+  (resolution is fixed, reusing `slug_param`), no new error class.
+
+### Changed
+
+- **`TenancyDable::Job` carries the acting membership.** Alongside the enqueue-time
+  tenant id, `Job` now serializes the membership id under a second namespaced key
+  (`SERIALIZED_MEMBERSHIP_KEY = "tenancy_dable_membership_id"`) and restores
+  `TenancyDable.current_membership` for the duration of `perform` — set **inside**
+  the existing `with_tenant` block, so that block's `ensure` tears tenant **and**
+  membership back down together (no leak across pooled jobs). A job's context (the
+  workspace *and* the role within it) now matches the enqueuing request's, not just
+  the tenant. **Backward compatible:** a payload enqueued before v0.3.0 has no
+  membership key and restores a nil membership; tenant propagation is byte-for-byte
+  unchanged. The `Job` concern's existing surface (`SERIALIZED_TENANT_KEY`,
+  `tenancy_dable_tenant_id`, `serialize`/`deserialize`, `around_perform`) is
+  untouched.
+
 ## [0.2.0] - 2026-06-05
 
 Three small, **additive** fixes from the v0.1.0 review. Default behavior is
@@ -105,6 +147,7 @@ in [DESIGN.md](DESIGN.md); usage is in [README.md](README.md).
   `UPGRADING.md` (semver policy, cross-project bumps, and the skeleton → gem
   migration guide), and `DESIGN.md` (the frozen per-symbol contract).
 
-[Unreleased]: https://github.com/edidable/tenancy_dable/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/edidable/tenancy_dable/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/edidable/tenancy_dable/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/edidable/tenancy_dable/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/edidable/tenancy_dable/releases/tag/v0.1.0
