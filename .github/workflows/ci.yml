@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  test:
+    name: "Ruby ${{ matrix.ruby }} · Rails ${{ matrix.rails }}"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ruby: ["3.2", "3.3", "3.4"]
+        rails: ["7.1", "7.2", "8.0", "8.1"]
+        exclude:
+          # Rails 7.1 predates Ruby 3.4 and is not supported together.
+          - ruby: "3.4"
+            rails: "7.1"
+    env:
+      RAILS_VERSION: ${{ matrix.rails }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+          # Resolution varies per RAILS_VERSION while the Gemfile is identical, so
+          # the lockfile-keyed cache can't distinguish cells — install fresh.
+          bundler-cache: false
+      - name: Install dependencies
+        run: bundle install --jobs 4 --retry 3
+      - name: Specs
+        run: bundle exec rspec
+
+  lint:
+    name: Standard (lint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+      - name: standardrb
+        run: bundle exec standardrb
