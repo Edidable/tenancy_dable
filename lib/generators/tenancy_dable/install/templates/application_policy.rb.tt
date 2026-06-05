@@ -1,0 +1,17 @@
+# frozen_string_literal: true
+
+# Base policy for the host app. It subclasses TenancyDable::Policy::Base, which is
+# secure-by-default: every action (index?/show?/create?/update?/destroy?) returns
+# false until a concrete policy grants it, and the nested Scope fails closed (no
+# active tenant => no rows). Build the Pundit subject with
+# `TenancyDable.pundit_context(user:, tenant:, membership:)` rather than a bare
+# user, so policies can decide on the acting role within the workspace.
+class ApplicationPolicy < TenancyDable::Policy::Base
+  # Workspace-wide rules go here; concrete policies (e.g. WidgetPolicy) subclass
+  # this and override the per-action predicates they want to allow.
+
+  # Inherits the fail-closed tenant Scope. Override `resolve` to layer per-model
+  # visibility on top of the tenant filter (call `super` to keep fail-closed).
+  class Scope < TenancyDable::Policy::Base::Scope
+  end
+end

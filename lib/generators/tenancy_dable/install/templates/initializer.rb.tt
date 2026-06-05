@@ -1,0 +1,51 @@
+# frozen_string_literal: true
+
+# TenancyDable configuration. Every setting below shows its DEFAULT; uncomment a
+# line to override it. As shipped, the defaults give you: fail-OPEN scoping (flip
+# `require_tenant` to fail closed), owner/admin/member roles, slug-based tenant
+# resolution on "/:tenant_slug", and audit logging of mid-request tenant changes.
+#
+# Full guide: https://github.com/edidable/tenancy_dable
+TenancyDable.configure do |config|
+  # --- Model names ---------------------------------------------------------
+  # config.tenant_model     = "Tenant"       # the workspace model
+  # config.user_model       = "User"         # the global identity model
+  # config.membership_model = "Membership"   # the user <-> tenant join model
+
+  # --- Roles ---------------------------------------------------------------
+  # Ordered highest-first. One predicate per role is generated on the membership
+  # (owner?, admin?, member?, ...); `roles.first` is the owner role.
+  # config.roles         = %w[owner admin member]
+  # config.manager_roles = %w[owner admin]   # the "can manage the workspace" set
+
+  # --- Columns & params ----------------------------------------------------
+  # config.tenant_fk  = :tenant_id    # foreign key on tenant-scoped models
+  # config.slug_param = :tenant_slug  # URL param tenant resolution reads
+
+  # --- Scoping behaviour ----------------------------------------------------
+  # When truthy-in-context, an unscoped query on a scoped model raises
+  # TenancyDable::NoTenantError instead of leaking every tenant's rows (fail
+  # closed). Accepts a boolean OR a callable evaluated per query.
+  # config.require_tenant = false
+
+  # --- Postgres row-level security (optional) ------------------------------
+  # config.rls = false
+  # config.rls_statement = ->(tenant) { "SET app.tenant_id = #{ActiveRecord::Base.connection.quote(tenant&.id)}" }
+
+  # --- Auditing -------------------------------------------------------------
+  # Behaviour when current_tenant is reassigned to a DIFFERENT tenant mid-request:
+  #   :log    (default) log tenant ids only, never payloads (security invariant 6)
+  #   :raise  raise TenancyDable::TenantOverrideError
+  #   :ignore say nothing
+  # config.audit_overrides = :log
+
+  # --- Resolution -----------------------------------------------------------
+  # When a slug matches no tenant: :raise (ActiveRecord::RecordNotFound) or
+  # :null (proceed with no tenant in context).
+  # config.on_tenant_not_found = :raise
+
+  # How resolution finds the acting user (auth-agnostic). The default reads the
+  # host app's `Current.user`; point it at your auth layer if different, e.g.
+  # `-> { current_user }` for Devise.
+  # config.current_user_resolver = -> { (defined?(::Current) && ::Current.respond_to?(:user)) ? ::Current.user : nil }
+end

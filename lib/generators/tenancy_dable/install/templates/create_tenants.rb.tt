@@ -1,0 +1,15 @@
+# frozen_string_literal: true
+
+# Workspaces. `slug` is the URL key tenant resolution looks up (unique); `name`
+# is a convenience label TenancyDable::TenantModel slugifies from.
+class <%= migration_class_name %> < ActiveRecord::Migration[<%= ActiveRecord::Migration.current_version %>]
+  def change
+    create_table :tenants do |t|
+      t.string :slug, null: false
+      t.string :name
+
+      t.timestamps
+    end
+    add_index :tenants, :slug, unique: true
+  end
+end

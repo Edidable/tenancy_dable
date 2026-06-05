@@ -1,0 +1,13 @@
+<% module_namespacing do -%>
+# Tenant-scoped via TenancyDable. `belongs_to_tenant` adds the tenant
+# association, the fail-closed default scope, create-time tenant_id assignment,
+# and tenant_id immutability after create (DESIGN.md §5.1).
+class <%= class_name %> < <%= parent_class_name %>
+  include TenancyDable::Scoped
+
+  belongs_to_tenant
+<% attributes.select(&:reference?).reject { |attribute| attribute.name == tenant_reference_name }.each do |attribute| -%>
+  belongs_to :<%= attribute.name %><%= ", polymorphic: true" if attribute.polymorphic? %>
+<% end -%>
+end
+<% end -%>

@@ -1,0 +1,10 @@
+# frozen_string_literal: true
+
+# Per-request global state, reset between requests by Rails. TenancyDable's
+# default `current_user_resolver` reads `Current.user`, so set it from your
+# authentication layer (e.g. `before_action { Current.user = authenticated_user }`)
+# and resolution will pick the acting user up automatically. Add more attributes
+# as your app needs them.
+class Current < ActiveSupport::CurrentAttributes
+  attribute :user
+end

@@ -1,0 +1,17 @@
+# frozen_string_literal: true
+
+# The user <-> tenant join carrying the role. A user may belong to a tenant at
+# most once (the composite unique index), and that membership is what slug
+# resolution enforces before entering a workspace.
+class <%= migration_class_name %> < ActiveRecord::Migration[<%= ActiveRecord::Migration.current_version %>]
+  def change
+    create_table :memberships do |t|
+      t.references :user, null: false, foreign_key: true
+      t.references :tenant, null: false, foreign_key: true
+      t.string :role, null: false
+
+      t.timestamps
+    end
+    add_index :memberships, [:user_id, :tenant_id], unique: true
+  end
+end

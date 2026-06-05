@@ -1,0 +1,19 @@
+# Test database for the Combustion harness.
+#
+# This is a *file-based* SQLite db (gitignored: see .gitignore
+# `/spec/internal/db/*.sqlite3`) rather than `:memory:`, on purpose:
+#
+#   A SQLite `:memory:` database only lives for the lifetime of the single
+#   connection that opened it. Combustion churns connections while booting (it
+#   re-`establish_connection`s during db reset, and the pool holds several
+#   connections), so the connection the schema is loaded into gets discarded and
+#   the test thread checks out a *fresh, empty* in-memory db — every query then
+#   fails with "Could not find table". A file-based db survives that churn.
+#
+# It stays ephemeral and clean: Combustion drops and recreates this file, then
+# reloads db/schema.rb, on every boot. Nothing here ever needs to be committed.
+test:
+  adapter: sqlite3
+  database: db/combustion_test.sqlite3
+  pool: 5
+  timeout: 5000

@@ -54,8 +54,13 @@ Gem::Specification.new do |spec|
   # security boundary with no third-party bus-factor.
 
   # --- Development --------------------------------------------------------
+  # The test harness boots a real (tiny) Rails app via Combustion so the gem is
+  # exercised against genuine ActiveRecord + ActionPack rather than mocks.
+  spec.add_development_dependency "rails", ">= 7.1", "< 9"
   spec.add_development_dependency "rspec", "~> 3.13"
+  spec.add_development_dependency "rspec-rails", ">= 6.0"
   spec.add_development_dependency "standard", "~> 1.40"
   spec.add_development_dependency "combustion", "~> 1.5"
+  spec.add_development_dependency "factory_bot", ">= 6.0"
   spec.add_development_dependency "sqlite3", ">= 1.6"
 end
