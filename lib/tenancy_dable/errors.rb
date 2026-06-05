@@ -24,8 +24,12 @@ module TenancyDable
   class BulkWriteError < Error; end
 
   # A tenant-scoped `belongs_to` pointed at a record from a different tenant.
-  # Used as the cross-tenant validation message style (Phase 03, §5.1).
-  class CrossTenantError < Error; end
+  # Used as the cross-tenant validation message style (Phase 03, §5.1). The
+  # `MESSAGE` constant is the single source of truth for that validation string;
+  # `Scoped` adds it to the record's errors (validation adds — it does not raise).
+  class CrossTenantError < Error
+    MESSAGE = "belongs to a different tenant"
+  end
 
   # Resolution found an acting user who is not a member of the resolved tenant
   # (Phase 05, §9). Membership is required to enter a workspace.

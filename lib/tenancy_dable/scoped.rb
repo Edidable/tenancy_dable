@@ -117,7 +117,7 @@ module TenancyDable
             target_tenant_id = assoc_klass.unscoped.where(id: assoc_id).pick(fk)
             next if target_tenant_id.nil? || target_tenant_id == self_tenant_id
 
-            errors.add(reflection.name, "belongs to a different tenant")
+            errors.add(reflection.name, TenancyDable::CrossTenantError::MESSAGE)
           end
         end
       end

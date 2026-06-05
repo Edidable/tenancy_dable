@@ -44,6 +44,16 @@ TenancyDable.configure do |config|
   # :null (proceed with no tenant in context).
   # config.on_tenant_not_found = :raise
 
+  # When the acting user is NOT a member of the resolved tenant:
+  #   :not_a_member_error  (default) raise TenancyDable::NotAMemberError
+  #   :not_authorized      raise Pundit::NotAuthorizedError (loaded lazily) — handy
+  #                        when your controllers already
+  #                        `rescue_from Pundit::NotAuthorizedError`
+  #   ->(tenant) { ... }   a callable run in the controller's context for full
+  #                        control: redirect_to(...), head(:forbidden), or raise
+  #                        your own. The resolved tenant is the sole argument.
+  # config.on_not_a_member = :not_a_member_error
+
   # How resolution finds the acting user (auth-agnostic). The default reads the
   # host app's `Current.user`; point it at your auth layer if different, e.g.
   # `-> { current_user }` for Devise.

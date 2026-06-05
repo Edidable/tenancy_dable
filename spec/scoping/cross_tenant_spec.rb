@@ -37,4 +37,15 @@ RSpec.describe "TenancyDable::Scoped — cross-tenant belongs_to validation" do
     expect(child).not_to be_valid
     expect(child.errors[:parent]).to include("belongs to a different tenant")
   end
+
+  it "sources the validation message from CrossTenantError::MESSAGE" do
+    # The class is no longer dead: `Scoped` adds exactly this constant, so the
+    # error hierarchy is the single source of truth for the message string.
+    parent_in_b = create(:widget, tenant: tenant_b)
+    child = build(:widget, tenant: tenant_a, parent: parent_in_b)
+
+    child.valid?
+
+    expect(child.errors[:parent]).to include(TenancyDable::CrossTenantError::MESSAGE)
+  end
 end

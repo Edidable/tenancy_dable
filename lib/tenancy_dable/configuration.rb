@@ -26,7 +26,7 @@ module TenancyDable
 
     # Behaviour switches.
     attr_accessor :require_tenant, :rls, :rls_statement, :audit_overrides,
-      :on_tenant_not_found, :current_user_resolver
+      :on_tenant_not_found, :on_not_a_member, :current_user_resolver
 
     def initialize
       @tenant_model = "Tenant"
@@ -41,6 +41,12 @@ module TenancyDable
       @rls_statement = ->(tenant) { "SET app.tenant_id = #{ActiveRecord::Base.connection.quote(tenant&.id)}" }
       @audit_overrides = :log
       @on_tenant_not_found = :raise
+      # Behavior when the acting user is NOT a member of the resolved tenant
+      # (v0.2.0, additive). The default preserves today's behavior — raise
+      # `NotAMemberError`. `:not_authorized` raises `Pundit::NotAuthorizedError`
+      # instead; a callable `->(tenant)` runs in the controller for full host
+      # control. Validated in `validate!`; dispatched by Resolvable (§9.1 step 3).
+      @on_not_a_member = :not_a_member_error
       # Auth-agnostic: read the host app's `Current.user` (the conventional
       # Rails CurrentAttributes pattern) when present, else nil. `::Current` is
       # explicit so this resolves the HOST's top-level model, never
@@ -73,8 +79,9 @@ module TenancyDable
     # --- validation --------------------------------------------------------
 
     # Raises ConfigurationError on the misconfigurations the contract names
-    # (§4.1): empty roles, manager_roles not a subset of roles, or a blank model
-    # name. Called by `TenancyDable.configure` after the host's block runs.
+    # (§4.1): empty roles, manager_roles not a subset of roles, a blank model
+    # name, or an `on_not_a_member` symbol outside the known set. Called by
+    # `TenancyDable.configure` after the host's block runs.
     def validate!
       raise ConfigurationError, "roles must not be empty" if Array(roles).empty?
 
@@ -87,6 +94,13 @@ module TenancyDable
         if value.nil? || value.to_s.strip.empty?
           raise ConfigurationError, "#{setting} must not be blank"
         end
+      end
+
+      # A Symbol must name a known mode; a callable (host-supplied handler) is
+      # accepted as-is — it runs in the controller at the call site (Resolvable).
+      if on_not_a_member.is_a?(Symbol) && !%i[not_a_member_error not_authorized].include?(on_not_a_member)
+        raise ConfigurationError,
+          "on_not_a_member #{on_not_a_member.inspect} must be :not_a_member_error, :not_authorized, or a callable"
       end
 
       self

@@ -24,7 +24,8 @@ RSpec.describe "Frozen public contract (PLAN.md)" do
       require_tenant: false,
       rls: false,
       audit_overrides: :log,
-      on_tenant_not_found: :raise
+      on_tenant_not_found: :raise,
+      on_not_a_member: :not_a_member_error
     }.each do |setting, default|
       it "#{setting} defaults to #{default.inspect}" do
         expect(config.public_send(setting)).to eq(default)
@@ -37,6 +38,15 @@ RSpec.describe "Frozen public contract (PLAN.md)" do
 
     it "current_user_resolver defaults to a callable" do
       expect(config.current_user_resolver).to respond_to(:call)
+    end
+
+    # Lock the surface area itself: exactly 14 host-settable settings at v0.2.0
+    # (the 13 frozen at v0.1.0 plus on_not_a_member). Derived from the class's own
+    # writers, so adding or removing ANY setting without updating this contract
+    # fails here, loudly. Each setting is one attr_accessor → one `name=` writer.
+    it "exposes exactly 14 settings (§4.1)" do
+      setters = TenancyDable::Configuration.instance_methods(false).grep(/=\z/)
+      expect(setters.size).to eq(14)
     end
   end
 
@@ -158,6 +168,15 @@ RSpec.describe "Frozen public contract (PLAN.md)" do
       it "#{error_name} < TenancyDable::Error" do
         expect(TenancyDable.const_get(error_name)).to be < TenancyDable::Error
       end
+    end
+
+    # v0.2.0 additive (Fix C): CrossTenantError gained a MESSAGE constant — the
+    # single source of truth for the cross-tenant belongs_to validation string,
+    # so the formerly-dead class is now the message's home. Locked here (value and
+    # all) as part of the frozen surface; Scoped ADDS it to errors, never raises.
+    # Error count is unchanged — still the 8 classes asserted above.
+    it "CrossTenantError::MESSAGE is the frozen cross-tenant validation string" do
+      expect(TenancyDable::CrossTenantError::MESSAGE).to eq("belongs to a different tenant")
     end
   end
 

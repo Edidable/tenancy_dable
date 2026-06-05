@@ -221,11 +221,43 @@ routes are nested under `scope "/:tenant_slug"` (the generator injects a comment
 scaffold). If your in-house resolver used a subdomain or an id, switch the routes to
 the slug — slug-only is a security invariant, not a preference.
 
+**Decide how non-members are handled.** Resolution refuses a user who isn't a member
+of the resolved workspace **before** your action runs. By default it raises
+`TenancyDable::NotAMemberError`; pick the failure shape that fits the app via
+`config.on_not_a_member`:
+
+- **Reuse an existing Pundit rescue.** If your controllers already
+  `rescue_from Pundit::NotAuthorizedError` (the edidable skeleton does), set
+  `config.on_not_a_member = :not_authorized` and non-members flow through that **same**
+  handler — no bespoke `rescue_from` for tenancy.
+- **Rescue the tenancy error directly.** Otherwise add a clause for it, e.g.
+
+  ```ruby
+  rescue_from TenancyDable::NotAMemberError do
+    redirect_to workspaces_path, alert: "You're not a member of that workspace."
+  end
+  ```
+
+  A callable (`config.on_not_a_member = ->(tenant) { head :forbidden }`) gives the
+  same control inline, run in the controller with the resolved tenant as its argument.
+
+The built-in messages are **English** (`"acting user is not a member of tenant …"`).
+If you surface them to users, **localize in your rescue** rather than relying on the
+raised string.
+
 **6. Rebase your policies.** Keep your concrete policies (`InvoicePolicy`, etc.) —
 just make sure they descend from the new `ApplicationPolicy < TenancyDable::Policy::Base`
 and use the gem's private helpers (`same_tenant?`, `owner?`, `manager?`, `member?`)
 instead of in-house ones. Feed Pundit the context via `pundit_user` (see §1). Replace
 any in-house `policy_scope` base with `ApplicationPolicy::Scope` (it fails closed).
+
+Keep the `Context = TenancyDable::Policy::Context` alias the generator now writes
+into `ApplicationPolicy`. The `Context` constant lives in the enclosing
+`TenancyDable::Policy` module, **not** in `Base`, so without the alias it would not
+resolve through `ApplicationPolicy` — existing policy specs that build the subject as
+`ApplicationPolicy::Context.new(user:, tenant:, membership:)` keep working **because**
+of it. Build `pundit_user` with `TenancyDable.pundit_context(user:, tenant:, membership:)`
+(see §1); the two construct the same context triple.
 
 **7. (Optional) Background jobs.** If you propagated the tenant into jobs by hand,
 delete that and opt into the gem's seam:
@@ -260,9 +292,10 @@ the behavior differences below.
   model with no active tenant now raise `BulkWriteError`. Wrap deliberate
   cross-tenant sweeps in `TenancyDable.without_tenant { … }`.
 - **Resolution is slug-only and membership-enforced.** A non-member hitting a
-  workspace URL gets `NotAMemberError` *before* the action runs; an unknown slug
-  raises `ActiveRecord::RecordNotFound` (or returns a null tenant with
-  `on_tenant_not_found = :null`).
+  workspace URL gets `NotAMemberError` *before* the action runs (or
+  `Pundit::NotAuthorizedError` / your callable's outcome — see `on_not_a_member` in
+  step 5); an unknown slug raises `ActiveRecord::RecordNotFound` (or returns a null
+  tenant with `on_tenant_not_found = :null`).
 - **A role literally named `manager` is a foot-gun.** The membership generates a
   `manager?` predicate from `config.roles` (role == `"manager"`), while
   `Membership#manager?` / the policy `manager?` mean "role ∈ `manager_roles`." If

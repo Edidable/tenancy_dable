@@ -93,6 +93,7 @@ end
 | `rls_statement` | `->(tenant) { "SET app.tenant_id = #{ActiveRecord::Base.connection.quote(tenant&.id)}" }` | The SQL emitted when `rls` is on. |
 | `audit_overrides` | `:log` | Behaviour when `current_tenant` is reassigned to a **different** tenant mid-request: `:log` (tenant ids only — never payloads), `:raise` (`TenantOverrideError`), or `:ignore`. |
 | `on_tenant_not_found` | `:raise` | When a slug matches no tenant: `:raise` (`ActiveRecord::RecordNotFound`) or `:null` (proceed with no tenant in context). |
+| `on_not_a_member` | `:not_a_member_error` | When the acting user is authenticated but **not** a member of the resolved tenant: `:not_a_member_error` (raise `NotAMemberError` — default, today's behavior) / `:not_authorized` (raise `Pundit::NotAuthorizedError`, required lazily — reuse an existing `rescue_from Pundit::NotAuthorizedError`) / a callable `->(tenant)` run with `instance_exec` in the controller (redirect, `head :forbidden`, raise your own). Membership stays required in every mode. |
 | `current_user_resolver` | `-> { (defined?(::Current) && ::Current.respond_to?(:user)) ? ::Current.user : nil }` | How resolution finds the acting user (auth-agnostic). Run with `instance_exec` in the controller, so `-> { current_user }` works for Devise. |
 
 > **Default is fail-OPEN.** As shipped, a scoped query with no active tenant returns `all`. Set `require_tenant = true` (or a per-query callable) to make those queries raise instead. The web request path is always scoped because [resolution](#3-slug-resolution) establishes a tenant before your action runs; `require_tenant` is the backstop for jobs, consoles, and rake tasks.
@@ -240,6 +241,8 @@ end
 ```
 
 `TenancyDable::Policy::Base` is **secure-by-default**: `index?/show?/create?/update?/destroy?` all return `false` until a subclass grants them (`new?`→`create?`, `edit?`→`update?`). The nested `Scope` **fails closed** — `policy_scope(Invoice)` returns `scope.none` when there's no active tenant, otherwise `scope.where(tenant_id: tenant.id)`.
+
+The generated `ApplicationPolicy` (from `tenancy_dable:install`) ships a `Context = TenancyDable::Policy::Context` alias, because the `Context` constant lives in the enclosing `TenancyDable::Policy` module — not in `Base` — and so would not otherwise resolve through `ApplicationPolicy`. The alias lets policy specs build the subject as `ApplicationPolicy::Context.new(user:, tenant:, membership:)` (equivalently, `TenancyDable.pundit_context(...)`) without reaching into the gem's namespace.
 
 ## Opt-in: ActiveJob tenant propagation
 

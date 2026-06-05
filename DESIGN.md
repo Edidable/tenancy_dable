@@ -6,6 +6,9 @@
 > deviate, it records the reason in the [Deviations](#10-deviations--observations)
 > section below and **keeps the public surface unchanged**.
 >
+> **v0.2.0 (nits run):** three additive fixes amend this contract — see §13. The
+> v0.1.0 surface above stays frozen except as noted there.
+>
 > Read order for every downstream worker: `.midgal/PLAN.md` → `DESIGN.md` →
 > your phase spec under `.midgal/phases/`.
 
@@ -19,7 +22,7 @@ that implements it. **Names here match `PLAN.md` exactly.**
 | Symbol | File | Implemented in |
 |---|---|---|
 | `TenancyDable` (module + facade) | `lib/tenancy_dable.rb` | 02 (entry stub exists) |
-| `TenancyDable::VERSION` | `lib/tenancy_dable/version.rb` | exists (`"0.0.1"` → `0.1.0` in 15) |
+| `TenancyDable::VERSION` | `lib/tenancy_dable/version.rb` | exists (`"0.0.1"` → `0.1.0` in 15; → `0.2.0` in nits phase 04, §13) |
 | `TenancyDable::Configuration` | `lib/tenancy_dable/configuration.rb` | 02 (stub exists) |
 | `TenancyDable::Current` | `lib/tenancy_dable/current.rb` | 02 |
 | `TenancyDable::Error` + 8 subclasses | `lib/tenancy_dable/errors.rb` | 02 (`Error` base exists in entry) |
@@ -162,11 +165,19 @@ the PLAN contract table). Phase 02 replaces today's empty stub.
 | `rls_statement` | `->(t) { "SET app.tenant_id = #{quote(t&.id)}" }` | callable(tenant) → SQL String emitted on tenant change |
 | `audit_overrides` | `:log` | `:log` / `:raise` / `:ignore` — behavior when `current_tenant` is reassigned to a **different** tenant |
 | `on_tenant_not_found` | `:raise` | `:raise` (→ `ActiveRecord::RecordNotFound`) / `:null` (→ nil tenant) |
+| `on_not_a_member` | `:not_a_member_error` | **(v0.2.0, additive)** host-selectable behavior when the acting user is not a member of the resolved tenant: `:not_a_member_error` (DEFAULT → raise `NotAMemberError`, today's behavior) / `:not_authorized` (→ raise `Pundit::NotAuthorizedError`; Pundit required lazily at the call site) / callable `->(tenant)` (run via `instance_exec` in the controller with the resolved tenant as the sole arg — redirect, custom error, `head :forbidden`, …) |
 | `current_user_resolver` | `-> { defined?(Current) && Current.respond_to?(:user) ? Current.user : nil }` | callable → acting user (auth-agnostic) |
 
+**Settings count: 14** — the 13 frozen at v0.1.0 plus `on_not_a_member` (added in
+v0.2.0; additive, default `:not_a_member_error` preserves behavior — see §13). The
+contract-lock spec (`spec/contract_spec.rb`) enumerates the frozen defaults; nits
+phase 02 adds `on_not_a_member` to that list.
+
 Validation (Phase 02): raise **`ConfigurationError`** on bad config — at minimum
-`roles` empty, `manager_roles ⊄ roles`, or a blank model name. Helpers the rest
-of the gem relies on (resolve constants from the string names):
+`roles` empty, `manager_roles ⊄ roles`, a blank model name, or an `on_not_a_member`
+symbol that is neither `:not_a_member_error` nor `:not_authorized` (a callable is
+accepted as-is). Helpers the rest of the gem relies on (resolve constants from the
+string names):
 
 ```ruby
 def tenant_class      #=> tenant_model.constantize
@@ -224,7 +235,7 @@ module TenancyDable::Scoped
       # 3. default_scope (decision tree below)
       # 4. before_validation(on: :create): auto-assign fk from current_tenant when blank
       # 5. tenant_fk immutability guard (persisted + fk change -> TenantImmutableError)
-      # 6. cross-tenant belongs_to validation (CrossTenantError-style message)
+      # 6. cross-tenant belongs_to validation (message from CrossTenantError::MESSAGE)
     end
 
     # Scope uniqueness of `fields` by the tenant fk (merges opts[:scope]).
@@ -254,9 +265,13 @@ allowed because the record is not yet persisted.
 
 **Cross-tenant `belongs_to` validation (invariant 2):** a `validate` callback that,
 for any tenant-scoped association whose target carries a `tenant_id`, adds a
-validation error with a **`CrossTenantError`**-style message when the target's
-tenant differs from the record's tenant. (The fixture's self-referential
-`widgets.parent_id` exercises this — §8.)
+validation error sourced from **`CrossTenantError::MESSAGE`** (`"belongs to a
+different tenant"` — the single source of truth for the string, additive in v0.2.0;
+§7) when the target's tenant differs from the record's tenant. The validation
+**adds an error, it does not raise** (the string is unchanged, so the existing
+red-team/cross-tenant specs keep passing); the previously-dead class is now the
+message's home. (The fixture's self-referential `widgets.parent_id` exercises this
+— §8.)
 
 ### 5.2 `TenancyDable::RelationExtension` — `lib/tenancy_dable/relation_extension.rb`
 
@@ -354,7 +369,7 @@ the trigger each one carries:
 | `NoTenantError` | fail-closed: scoped query with `require_tenant` active and no current tenant (§5.1) |
 | `TenantImmutableError` | reassigning a persisted record's tenant fk (§5.1, invariant 3) |
 | `BulkWriteError` | guarded `update_all`/`delete_all`/`destroy_all` without a valid current-tenant scope (§5.2) |
-| `CrossTenantError` | cross-tenant `belongs_to` reference (used as the validation message style; §5.1) |
+| `CrossTenantError` | cross-tenant `belongs_to` reference — home of `MESSAGE = "belongs to a different tenant"` (constant additive in v0.2.0; the single source for the validation error string, §5.1). The validation *adds* this message, it does not raise. |
 | `NotAMemberError` | resolved acting user is not a member of the resolved tenant (§9) |
 | `TenantNotFoundError` | defined + reserved for host/`find_by` strategies (see §10-A) |
 | `TenantOverrideError` | `current_tenant=` reassignment to a different tenant when `audit_overrides == :raise` (§4.2) |
@@ -428,7 +443,11 @@ module TenancyDable::Controller::Resolvable
   #   1. tenant = config.tenant_class.find_by!(slug: params[config.slug_param])
   #        honor on_tenant_not_found: :raise → ActiveRecord::RecordNotFound; :null → nil
   #   2. user   = instance_exec(&config.current_user_resolver)     # auth-agnostic
-  #   3. membership = user&.membership_for(tenant) or raise NotAMemberError
+  #   3. membership = user&.membership_for(tenant); when absent, dispatch on
+  #        config.on_not_a_member (v0.2.0): :not_a_member_error -> raise
+  #        NotAMemberError (default, today's behavior); :not_authorized -> raise
+  #        Pundit::NotAuthorizedError; callable -> instance_exec(tenant, &callable).
+  #        resolve_tenant! signature unchanged.
   #   4. TenancyDable.current_tenant = tenant; .current_membership = membership
   def default_url_options  # merges { config.slug_param => TenancyDable.current_tenant&.slug }
 end
@@ -557,3 +576,82 @@ that implements it and the spec that proves it (final adversarial gate: Phase 15
   (§8).
 - ✅ Deviations recorded with rationale; public surface unchanged (§10).
 - ✅ No file under `lib/` modified by this phase.
+
+---
+
+## 13. v0.2.0 nits delta (additive — frozen for the nits run)
+
+> Authoritative for this run: `.midgal/NITS_PLAN.md`. The v0.1.0 contract above
+> stays frozen **except** as amended here. All three fixes are **additive**:
+> default behavior is unchanged, no host breaks, the error hierarchy stays at
+> **8 classes**, and every frozen signature (the `TenancyDable` facade, `Scoped`,
+> `Resolvable`, the policy classes) is untouched. No default that affects tenant
+> isolation changes — the §11 security invariants hold as-is. This phase (nits 00)
+> writes no `lib/` code; it only records the contract delta the later phases
+> implement against.
+
+**Version bump:** `TenancyDable::VERSION` `0.1.0` → **`0.2.0`** (additive new config
+setting = MINOR). Default behavior unchanged, so no host breaks; `~> 0.1.0` pins
+simply won't pick it up (expected pre-1.0). Bumped in nits phase 04.
+
+### Fix A — generated `ApplicationPolicy` ships the `Context` alias
+The install generator's `application_policy.rb.tt` template adds, inside the
+generated `ApplicationPolicy`, the one-line alias
+
+```ruby
+Context = TenancyDable::Policy::Context  # so ApplicationPolicy::Context resolves for policy specs
+```
+
+plus a commented `pundit_user` example pointing at `TenancyDable.pundit_context(...)`.
+**Generator/template change only** — the gem ships no `ApplicationPolicy`, and no
+runtime lib symbol changes. (Without it, a host's `ApplicationPolicy <
+TenancyDable::Policy::Base` cannot resolve `ApplicationPolicy::Context`, because the
+constant lives in the enclosing `TenancyDable::Policy` module, not in `Base`, so
+existing host policy specs that say `ApplicationPolicy::Context.new(...)` break on
+adoption.) Implemented in nits phase 01; proven by `rspec spec/generators`.
+
+### Fix B — `on_not_a_member` config setting (§4.1, §9.1)
+New setting `on_not_a_member`, default `:not_a_member_error` (preserves today's
+behavior). Accepted values:
+- `:not_a_member_error` (**DEFAULT**) → raise `TenancyDable::NotAMemberError`,
+- `:not_authorized` → raise `Pundit::NotAuthorizedError` (Pundit required lazily at
+  the call site — it is already a runtime dep),
+- a **callable** `->(tenant)` → run via `instance_exec` in the controller with the
+  resolved tenant as the sole arg, for full host control (redirect, custom error,
+  `head :forbidden`).
+
+`Configuration#validate!` raises `ConfigurationError` for a symbol that is neither
+known value; a callable is accepted as-is. `Resolvable`'s membership-missing branch
+(§9.1 step 3) dispatches on this setting instead of always raising — its
+`resolve_tenant!` signature is unchanged. **Settings count → 14.** Implemented in
+nits phase 02 (and `spec/contract_spec.rb`'s frozen-defaults list gains
+`on_not_a_member: :not_a_member_error`); proven by `rspec spec/resolution
+spec/contract_spec.rb`.
+
+### Fix C — `CrossTenantError::MESSAGE` (§5.1, §7)
+`CrossTenantError` gains a single source of truth for its string (the class was
+defined in the frozen 8-error hierarchy but previously never referenced):
+
+```ruby
+class CrossTenantError < Error
+  MESSAGE = "belongs to a different tenant"
+end
+```
+
+The cross-tenant `belongs_to` validation in `Scoped` sources its message from it —
+`errors.add(reflection.name, TenancyDable::CrossTenantError::MESSAGE)`. The
+validation still **adds** an error (it does **not** raise), and the message string
+is byte-for-byte unchanged, so the existing red-team/cross-tenant specs stay green;
+the previously-dead class is now the message's home. The class is **not** new (error
+count stays 8) — only the constant is additive. Implemented in nits phase 03; proven
+by `rspec spec/scoping`.
+
+### Contract impact summary
+- New config setting `on_not_a_member` (default `:not_a_member_error`) → **14
+  settings** (was 13).
+- `CrossTenantError::MESSAGE` constant — **additive**; error count stays **8 classes**.
+- Generated `ApplicationPolicy` defines `Context = TenancyDable::Policy::Context` —
+  **template-only**, no runtime surface change.
+- Frozen `TenancyDable` facade / `Scoped` / `Resolvable` / policy signatures:
+  **unchanged**.
+- No default that affects isolation changes; security invariants (§11) hold as-is.

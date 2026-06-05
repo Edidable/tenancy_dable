@@ -58,6 +58,15 @@ RSpec.describe TenancyDable::Generators::InstallGenerator do
       expect(valid_ruby?(policy)).to be(true)
     end
 
+    # Fix A: the constant lives in TenancyDable::Policy, not in Base, so a host
+    # whose specs say `ApplicationPolicy::Context.new(...)` only resolves it via
+    # this alias. Generated, not shipped — the gem ships no ApplicationPolicy.
+    it "aliases Context on the generated ApplicationPolicy so policy specs resolve it" do
+      policy = read_generated(destination, "app/policies/application_policy.rb")
+
+      expect(policy).to include("Context = TenancyDable::Policy::Context")
+    end
+
     it "injects the slug-only tenant route scaffold once" do
       routes = read_generated(destination, "config/routes.rb")
 

@@ -11,6 +11,45 @@ derived edidable projects, see [UPGRADING.md](UPGRADING.md).
 
 _Nothing yet._
 
+## [0.2.0] - 2026-06-05
+
+Three small, **additive** fixes from the v0.1.0 review. Default behavior is
+unchanged, so no host breaks; the public surface stays frozen except as recorded
+in [DESIGN.md §13](DESIGN.md#13-v020-nits-delta-additive--frozen-for-the-nits-run).
+Because this is a `0.MINOR` bump, `~> 0.1.0` pins will **not** pick it up
+automatically (review by hand — see [UPGRADING.md](UPGRADING.md#pre-10-caveat)).
+
+### Added
+
+- **`config.on_not_a_member`** (Fix B) — host-selectable behavior when the acting
+  user is authenticated but **not** a member of the resolved tenant. Default
+  `:not_a_member_error` preserves v0.1.0 behavior (raise
+  `TenancyDable::NotAMemberError`); `:not_authorized` raises
+  `Pundit::NotAuthorizedError` instead (so controllers that already
+  `rescue_from Pundit::NotAuthorizedError` need no bespoke clause); a callable
+  `->(tenant)` runs via `instance_exec` in the controller for full control
+  (redirect, `head :forbidden`, custom error). `Configuration#validate!` rejects an
+  unknown symbol; a callable is accepted as-is. This is the **14th** config setting
+  (was 13). Membership stays required in every mode — a non-member never gets a
+  published tenant.
+- **`CrossTenantError::MESSAGE`** (Fix C) — a `MESSAGE = "belongs to a different
+  tenant"` constant, now the single source of truth for the cross-tenant
+  `belongs_to` validation string. The previously-dead class (defined in the frozen
+  8-error hierarchy but never referenced) is now the message's home. The validation
+  still **adds** the error — it does not raise — and the string is byte-for-byte
+  unchanged. Error hierarchy stays at **8 classes**.
+
+### Changed
+
+- **Generated `ApplicationPolicy` ships the `Context` alias** (Fix A) — the install
+  generator's `application_policy.rb.tt` template now defines
+  `Context = TenancyDable::Policy::Context` inside `ApplicationPolicy` (plus a
+  commented `pundit_user` example), so a host's `ApplicationPolicy::Context.new(...)`
+  resolves after adoption. Without it, the constant lives only in the enclosing
+  `TenancyDable::Policy` module and existing host policy specs break on adoption.
+  **Generated-template change only** — the gem ships no `ApplicationPolicy`, and no
+  runtime lib symbol changes.
+
 ## [0.1.0] - 2026-06-04
 
 First release: the full multi-workspace tenancy layer extracted from the edidable
@@ -66,5 +105,6 @@ in [DESIGN.md](DESIGN.md); usage is in [README.md](README.md).
   `UPGRADING.md` (semver policy, cross-project bumps, and the skeleton → gem
   migration guide), and `DESIGN.md` (the frozen per-symbol contract).
 
-[Unreleased]: https://github.com/edidable/tenancy_dable/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/edidable/tenancy_dable/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/edidable/tenancy_dable/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/edidable/tenancy_dable/releases/tag/v0.1.0

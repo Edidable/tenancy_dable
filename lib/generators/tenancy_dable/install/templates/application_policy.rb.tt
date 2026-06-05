@@ -6,7 +6,23 @@
 # active tenant => no rows). Build the Pundit subject with
 # `TenancyDable.pundit_context(user:, tenant:, membership:)` rather than a bare
 # user, so policies can decide on the acting role within the workspace.
+#
+# Wire that subject once in ApplicationController via Pundit's `pundit_user`
+# hook, so every policy and `policy_scope` call decides on the context triple:
+#
+#   def pundit_user
+#     TenancyDable.pundit_context(
+#       user: current_user,
+#       tenant: TenancyDable.current_tenant,
+#       membership: TenancyDable.current_membership
+#     )
+#   end
 class ApplicationPolicy < TenancyDable::Policy::Base
+  # So `ApplicationPolicy::Context` resolves (the constant lives in
+  # TenancyDable::Policy, not in Base) — lets policy specs build the subject
+  # as ApplicationPolicy::Context.new(...) or TenancyDable.pundit_context(...).
+  Context = TenancyDable::Policy::Context
+
   # Workspace-wide rules go here; concrete policies (e.g. WidgetPolicy) subclass
   # this and override the per-action predicates they want to allow.
 

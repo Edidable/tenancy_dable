@@ -53,7 +53,8 @@ module TenancyDable
       # The `before_action` body. Order (DESIGN.md §9.1), every step slug-driven:
       #   1. find the tenant by slug (honoring `on_tenant_not_found`),
       #   2. resolve the acting user (auth-agnostic, via `current_user_resolver`),
-      #   3. require a membership or raise `NotAMemberError`,
+      #   3. require a membership, else dispatch on `on_not_a_member` (default
+      #      raises `NotAMemberError`),
       #   4. publish `current_tenant` + `current_membership`.
       def tenancy_dable_resolve_tenant
         config = TenancyDable.configuration
@@ -72,12 +73,35 @@ module TenancyDable
         user = instance_exec(&config.current_user_resolver)
         membership = user&.membership_for(tenant)
         if membership.nil?
-          raise TenancyDable::NotAMemberError,
-            "acting user is not a member of tenant #{tenant.slug.inspect}"
+          tenancy_dable_handle_not_a_member(config, tenant)
+          return
         end
 
         TenancyDable.current_tenant = tenant
         TenancyDable.current_membership = membership
+      end
+
+      # The membership-missing branch (§9.1 step 3), dispatched on
+      # `config.on_not_a_member` (DESIGN §4.1). The default preserves today's
+      # behavior — raise `NotAMemberError`. A host may instead choose
+      # `:not_authorized` (raise `Pundit::NotAuthorizedError`, so controllers that
+      # already `rescue_from Pundit::NotAuthorizedError` need no bespoke clause for
+      # non-members), or supply a callable run via `instance_exec` in THIS
+      # controller's context with the resolved tenant as the sole arg (redirect,
+      # `head :forbidden`, raise its own). Either way the caller `return`s without
+      # publishing — membership is required to enter a workspace (invariant 2), so a
+      # non-member never gets a published tenant regardless of the chosen mode.
+      def tenancy_dable_handle_not_a_member(config, tenant)
+        case (setting = config.on_not_a_member)
+        when :not_a_member_error
+          raise TenancyDable::NotAMemberError,
+            "acting user is not a member of tenant #{tenant.slug.inspect}"
+        when :not_authorized
+          require "pundit" # lazy — Pundit is a runtime dep, loaded only when chosen
+          raise Pundit::NotAuthorizedError
+        else
+          instance_exec(tenant, &setting)
+        end
       end
 
       # Look the tenant up BY SLUG (never by id — invariant 5). `:raise` (the

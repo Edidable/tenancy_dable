@@ -197,3 +197,31 @@ security-conscious host can make an informed call. None is a defect.
 Nothing blocking. The whole phased build remains **uncommitted on `master`** (no
 phase spec instructed a commit); committing/tagging `v0.1.0` and publishing is a
 release-time action for the maintainer, outside the autonomous build's scope.
+
+---
+
+## v0.2.0 addendum (nits run) — 2026-06-05
+
+A lean 6-phase follow-up applied **three small, additive fixes** flagged by the
+v0.1.0 review and bumped `TenancyDable::VERSION` `0.1.0` → **`0.2.0`** (additive
+config setting = MINOR). Default behavior is unchanged — no host breaks — and the
+frozen public surface holds except as recorded in [DESIGN.md §13](DESIGN.md). The
+error hierarchy stays at **8 classes**; config settings go **13 → 14**; the six
+security invariants (§1) hold as-is (no isolation default changed). Work landed on
+branch `nits/v0.2.0`.
+
+**Suite: `bundle exec rspec` green — 260 examples, 0 failures** (was 251 at v0.1.0;
+**+9** from the nits specs):
+
+| Fix | Change | New/changed spec | Δ examples |
+|---|---|---|---:|
+| **A** | Generated `ApplicationPolicy` ships `Context = TenancyDable::Policy::Context` (plus a commented `pundit_user` example), so a host's `ApplicationPolicy::Context.new(...)` resolves after adoption. **Generated-template change only** — no runtime lib surface change. | `spec/generators/install_generator_spec.rb` (9→10) | +1 |
+| **B** | New `config.on_not_a_member` setting: `:not_a_member_error` (default — raise `NotAMemberError`, today's behavior), `:not_authorized` (raise `Pundit::NotAuthorizedError`), or a callable `->(tenant)` run in the controller. `Configuration#validate!` rejects an unknown symbol. The **14th** setting; `Resolvable`'s membership-missing branch dispatches on it. | `spec/resolution/not_a_member_behavior_spec.rb` (new, 5) + `spec/contract_spec.rb` (60→62) | +7 |
+| **C** | `CrossTenantError::MESSAGE = "belongs to a different tenant"` — the previously-dead class is now the single source of truth for the cross-tenant `belongs_to` validation string; `Scoped` references it. Validation still **adds** the error (does not raise); string byte-for-byte unchanged. Additive constant; error count stays 8. | `spec/scoping/cross_tenant_spec.rb` (3→4) | +1 |
+
+The two **UPGRADING gaps** the v0.1.0 review named are now folded into
+[UPGRADING.md §3](UPGRADING.md): the `ApplicationPolicy::Context` alias note (Fix A)
+and the `rescue_from TenancyDable::NotAMemberError` / `on_not_a_member = :not_authorized`
+guidance for non-members (Fix B; messages are English — localize in the rescue).
+`CHANGELOG.md` carries the dated `[0.2.0]` entry. As with the v0.1.0 build, the work
+is **uncommitted** pending the maintainer's commit/tag (`v0.2.0`).
