@@ -9,6 +9,9 @@
 > **v0.2.0 (nits run):** three additive fixes amend this contract — see §13. The
 > v0.1.0 surface above stays frozen except as noted there.
 >
+> **v0.4.0:** `current_membership` answers only inside its own tenant, and
+> `foreign_membership?` is added. See §15.
+>
 > Read order for every downstream worker: `.midgal/PLAN.md` → `DESIGN.md` →
 > your phase spec under `.midgal/phases/`.
 
@@ -125,7 +128,8 @@ module TenancyDable
     def current_tenant                       #=> tenant instance | nil
     def current_tenant=(tenant)              # runs audit-override check (§4.2)
                                              #   + fires RLS hook when config.rls
-    def current_membership                   #=> membership instance | nil
+    def current_membership                   #=> membership of the current tenant | nil
+    def foreign_membership?                  #=> membership set, but not the current tenant's (v0.4.0, §15)
     def current_membership=(membership)
     def with_tenant(tenant) { ... }          # set tenant for block; ensure-restore
     def without_tenant { ... }               # set tenant_scope_disabled; ensure-restore
@@ -137,8 +141,9 @@ end
 ```
 
 Return-shape contract:
-- `current_tenant` / `current_membership` return the live AR instances stored in
-  `Current`, or `nil`.
+- `current_tenant` returns the live AR instance stored in `Current`, or `nil`.
+  `current_membership` returns the stored membership only while its `tenant_id`
+  is the current tenant's id, else `nil` (v0.4.0, §15).
 - `with_tenant` / `without_tenant` return the **block's** return value and
   **always** restore the prior `Current` state via an `ensure` block (nesting-safe).
 - `current_tenant=` is the **only** place the audit-override policy and the RLS
@@ -848,3 +853,19 @@ unchanged.
   runtime change; `rails` already provides `actioncable` for the harness.
 - Security: invariant 5 (slug-only) now also governs Cable resolution; no default
   affecting tenant isolation changes; the §11 invariants hold as-is.
+
+---
+
+## 15. v0.4.0 delta - `current_membership` follows the tenant
+
+- `current_membership` returns the stored membership only while its `tenant_id`
+  is the current tenant's id, else `nil`. The stored value is not touched, so
+  `with_tenant` still restores it on exit.
+- `foreign_membership?` (new) is true when a membership is stored but is not the
+  current tenant's, including when no tenant is current (a `Job` whose tenant
+  was deleted runs under `with_tenant(nil)`). A host that treats a nil
+  membership as a system context checks it.
+- `Job#serialize` reads the stored membership (`Current.membership`) instead of
+  `current_membership` (amends §14.2), so the payload is unchanged.
+- Version `0.4.0`: a changed return value on a frozen reader plus one facade
+  method. Errors stay 8, settings stay 14.

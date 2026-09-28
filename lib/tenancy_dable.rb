@@ -66,8 +66,19 @@ module TenancyDable
       fire_rls(previous, tenant)
     end
 
+    # The acting membership, but only while it belongs to the current tenant, so
+    # inside `with_tenant(other)` nothing decides with a role from another tenant.
     def current_membership
-      Current.membership
+      membership = Current.membership
+      tenant = Current.tenant
+      membership if tenant && membership&.tenant_id == tenant.id
+    end
+
+    # A membership is set but it is not the current tenant's, or no tenant is
+    # current. A host that treats a nil `current_membership` as a system context
+    # must check this too.
+    def foreign_membership?
+      !Current.membership.nil? && current_membership.nil?
     end
 
     def current_membership=(membership)

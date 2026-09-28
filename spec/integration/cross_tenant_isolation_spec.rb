@@ -59,4 +59,62 @@ RSpec.describe "Integration: cross-tenant isolation" do
     found = TenancyDable.with_tenant(tenant_b) { Widget.find(widget_b1.id) }
     expect(found).to eq(widget_b1)
   end
+
+  describe "the current membership" do
+    it "is nil inside another tenant, and returns once with_tenant exits" do
+      TenancyDable.with_tenant(tenant_a) do
+        TenancyDable.current_membership = membership_a
+
+        TenancyDable.with_tenant(tenant_b) { expect(TenancyDable.current_membership).to be_nil }
+        expect(TenancyDable.current_membership).to eq(membership_a)
+      end
+    end
+
+    it "is nil after current_tenant is reassigned to another tenant" do
+      TenancyDable.current_tenant = tenant_a
+      TenancyDable.current_membership = membership_a
+      TenancyDable.current_tenant = tenant_b
+
+      expect(TenancyDable.current_membership).to be_nil
+    end
+
+    it "does not let a policy built inside another tenant use the outer role" do
+      policy_class = Class.new(TenancyDable::Policy::Base) do
+        def update? = manager? && same_tenant?
+      end
+
+      allowed = TenancyDable.with_tenant(tenant_a) do
+        TenancyDable.current_membership = membership_a
+        TenancyDable.with_tenant(tenant_b) do
+          context = TenancyDable.pundit_context(
+            user: user_a, tenant: TenancyDable.current_tenant, membership: TenancyDable.current_membership
+          )
+          policy_class.new(context, widget_b1).update?
+        end
+      end
+
+      expect(allowed).to be(false)
+    end
+  end
+
+  describe "foreign_membership?" do
+    it "is false with no membership, false in its own tenant, and true inside another" do
+      TenancyDable.with_tenant(tenant_a) do
+        expect(TenancyDable.foreign_membership?).to be(false)
+        TenancyDable.current_membership = membership_a
+        expect(TenancyDable.foreign_membership?).to be(false)
+
+        TenancyDable.with_tenant(tenant_b) { expect(TenancyDable.foreign_membership?).to be(true) }
+      end
+    end
+
+    it "is true with no current tenant, as in a job whose tenant was deleted" do
+      TenancyDable.with_tenant(nil) do
+        TenancyDable.current_membership = membership_a
+
+        expect(TenancyDable.current_membership).to be_nil
+        expect(TenancyDable.foreign_membership?).to be(true)
+      end
+    end
+  end
 end

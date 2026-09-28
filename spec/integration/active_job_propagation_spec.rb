@@ -13,12 +13,13 @@ class IntegrationTenantProbeJob < ActiveJob::Base
   include TenancyDable::Job
 
   class << self
-    attr_accessor :observed_tenant_id, :observed_membership_id, :observed_widget_ids
+    attr_accessor :observed_tenant_id, :observed_membership_id, :observed_stored_membership_id, :observed_widget_ids
   end
 
   def perform
     self.class.observed_tenant_id = TenancyDable.current_tenant&.id
     self.class.observed_membership_id = TenancyDable.current_membership&.id
+    self.class.observed_stored_membership_id = TenancyDable::Current.membership&.id
     self.class.observed_widget_ids = Widget.order(:id).pluck(:id)
   end
 end
@@ -49,6 +50,7 @@ RSpec.describe "Integration: ActiveJob tenant propagation" do
   before do
     IntegrationTenantProbeJob.observed_tenant_id = nil
     IntegrationTenantProbeJob.observed_membership_id = nil
+    IntegrationTenantProbeJob.observed_stored_membership_id = nil
     IntegrationTenantProbeJob.observed_widget_ids = nil
   end
 
@@ -152,6 +154,20 @@ RSpec.describe "Integration: ActiveJob tenant propagation" do
 
       expect(TenancyDable.current_tenant).to be_nil
       expect(TenancyDable.current_membership).to be_nil
+    end
+
+    it "carries a membership of another tenant, which is not current inside perform" do
+      payload = TenancyDable.with_tenant(tenant_a) do
+        TenancyDable.current_membership = membership_a
+        TenancyDable.with_tenant(tenant_b) { IntegrationTenantProbeJob.new.serialize }
+      end
+
+      expect(payload["tenancy_dable_membership_id"]).to eq(membership_a.id)
+      ActiveJob::Base.execute(payload)
+
+      expect(IntegrationTenantProbeJob.observed_tenant_id).to eq(tenant_b.id)
+      expect(IntegrationTenantProbeJob.observed_membership_id).to be_nil
+      expect(IntegrationTenantProbeJob.observed_stored_membership_id).to eq(membership_a.id)
     end
 
     it "restores the tenant but a nil membership for an older payload (no membership key)" do

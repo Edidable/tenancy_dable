@@ -14,7 +14,9 @@ module TenancyDable
   # the current tenant rather than logic scattered across attribute writers.
   #
   #   * tenant                 — the active workspace record (or nil)
-  #   * membership             — the acting user's membership in that tenant
+  #   * membership             - the acting user's membership as set, possibly
+  #                              another tenant's (`TenancyDable.current_membership`
+  #                              answers it only inside its own tenant)
   #   * tenant_scope_disabled  — flag toggled by `without_tenant`; the scoping
   #                              engine (Phase 03) and bulk-write guard read it
   #                              to bypass tenant filtering.
