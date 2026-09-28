@@ -9,7 +9,11 @@ derived edidable projects, see [UPGRADING.md](UPGRADING.md).
 
 ## [Unreleased]
 
-To be released as `0.4.0`. See [UPGRADING.md](UPGRADING.md#behavior-differences-to-expect).
+_Nothing yet._
+
+## [0.4.0] - 2026-09-28
+
+See [UPGRADING.md](UPGRADING.md#behavior-differences-to-expect).
 
 ### Security
 
@@ -163,7 +167,8 @@ in [DESIGN.md](DESIGN.md); usage is in [README.md](README.md).
   `UPGRADING.md` (semver policy, cross-project bumps, and the skeleton → gem
   migration guide), and `DESIGN.md` (the frozen per-symbol contract).
 
-[Unreleased]: https://github.com/edidable/tenancy_dable/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/edidable/tenancy_dable/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/edidable/tenancy_dable/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/edidable/tenancy_dable/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/edidable/tenancy_dable/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/edidable/tenancy_dable/releases/tag/v0.1.0
