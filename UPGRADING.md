@@ -329,6 +329,12 @@ the behavior differences below.
   restores the enqueue-time membership as well. A job that read `current_membership`
   and relied on it being nil should be reviewed. Backward compatible the other way:
   payloads enqueued before v0.3.0 (no membership key) restore a nil membership.
+- **`current_membership` is nil outside its own tenant (v0.4.0).** Inside
+  `with_tenant(other_tenant)`, or after assigning `current_tenant` directly, it used
+  to return the outer tenant's membership; it now returns nil until the tenant is
+  restored. If your code treats a nil `current_membership` as a system context,
+  also check `TenancyDable.foreign_membership?`, or a job carrying a membership of
+  another tenant starts to look like the system.
 - **A role literally named `manager` is a foot-gun.** The membership generates a
   `manager?` predicate from `config.roles` (role == `"manager"`), while
   `Membership#manager?` / the policy `manager?` mean "role ∈ `manager_roles`." If

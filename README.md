@@ -139,6 +139,8 @@ TenancyDable.current_tenant            # => the active workspace (or nil)
 TenancyDable.current_tenant = workspace
 TenancyDable.with_tenant(workspace) { … }  # set for the block, restore after (nesting-safe; returns block value)
 TenancyDable.without_tenant { … }          # disable scoping for the block
+TenancyDable.current_membership        # => the acting membership, or nil when it is not the current tenant's
+TenancyDable.foreign_membership?       # => true when a membership is set but is not the current tenant's
 ```
 
 ### 2. Identity model
@@ -246,7 +248,7 @@ The generated `ApplicationPolicy` (from `tenancy_dable:install`) ships a `Contex
 
 ## Opt-in: ActiveJob tenant propagation
 
-A background job should run under the same workspace as the request that enqueued it. The `TenancyDable::Job` concern carries the current tenant's id **and the acting membership's id** through the serialized payload and restores both for `perform` — so a job's context (the workspace *and* the role within it) matches the enqueuing request's, not just the tenant.
+A background job should run under the same workspace as the request that enqueued it. The `TenancyDable::Job` concern carries the current tenant's id **and the acting membership's id** through the serialized payload and restores both for `perform`, so a job's context (the workspace *and* the role within it) matches the enqueuing request's, not just the tenant. A membership of another tenant travels too, and reads in `perform` as `foreign_membership?`, not as `current_membership`.
 
 It is **not** auto-required (so ActiveJob stays an optional dependency) — wire it up explicitly:
 

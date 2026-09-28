@@ -55,7 +55,7 @@ RSpec.describe "Frozen public contract (PLAN.md)" do
     %i[
       configure configuration reset_configuration!
       current_tenant current_tenant= current_membership current_membership=
-      with_tenant without_tenant pundit_context
+      foreign_membership? with_tenant without_tenant pundit_context
     ].each do |method_name|
       it "responds to .#{method_name}" do
         expect(TenancyDable).to respond_to(method_name)

@@ -12,10 +12,11 @@ module TenancyDable
   # guard, exactly as they would have inline — without the host threading a
   # tenant id through every job's arguments.
   #
-  # The enqueue-time MEMBERSHIP travels the same way (v0.3.0): the acting
-  # membership's id is captured alongside the tenant id and restored as
-  # `TenancyDable.current_membership` for `perform`, so a job's context — tenant
-  # AND role — matches the request's. The membership is set INSIDE the same
+  # The enqueue-time MEMBERSHIP travels the same way (v0.3.0): the stored
+  # membership's id is captured alongside the tenant id and restored for
+  # `perform`, so a job's context (tenant AND role) matches the request's; a
+  # membership of another tenant is restored as well and reads there as
+  # `foreign_membership?`, not `current_membership`. It is set INSIDE the same
   # `with_tenant` block, so that block's `ensure` tears it down with the tenant
   # (no leak across pooled jobs). Backward compatible: an older payload without
   # the membership key restores a nil membership and the unchanged tenant.
@@ -72,11 +73,12 @@ module TenancyDable
     # Snapshot the current tenant id AND membership id into the serialized payload.
     # ActiveJob calls `serialize` at enqueue, so this captures the workspace — and
     # the role within it — the job was enqueued under. Already-set ids (e.g. a
-    # retry re-serializing after restore) are kept.
+    # retry re-serializing after restore) are kept. The stored membership is read,
+    # not `current_membership`, so a membership of another tenant still travels.
     def serialize
       super.merge(
         SERIALIZED_TENANT_KEY => tenancy_dable_tenant_id || TenancyDable.current_tenant&.id,
-        SERIALIZED_MEMBERSHIP_KEY => tenancy_dable_membership_id || TenancyDable.current_membership&.id
+        SERIALIZED_MEMBERSHIP_KEY => tenancy_dable_membership_id || TenancyDable::Current.membership&.id
       )
     end
 

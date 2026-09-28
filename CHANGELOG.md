@@ -9,7 +9,23 @@ derived edidable projects, see [UPGRADING.md](UPGRADING.md).
 
 ## [Unreleased]
 
-_Nothing yet._
+To be released as `0.4.0`. See [UPGRADING.md](UPGRADING.md#behavior-differences-to-expect).
+
+### Security
+
+- **`current_membership` no longer returns a membership of another tenant.** Inside
+  `with_tenant(other_tenant)`, or after `current_tenant=` moved to another tenant, it
+  kept returning the outer tenant's membership, so a `pundit_context` built from it
+  decided with that tenant's role. It now returns nil there, and the membership reads
+  again once `with_tenant` restores the outer tenant. A host that treats "no
+  membership" as a system context now sees nil for a member of another tenant too,
+  and must also check `foreign_membership?`.
+
+### Added
+
+- **`TenancyDable.foreign_membership?`**: true when a membership is set but is not the
+  current tenant's, including when no tenant is current. `TenancyDable::Job` keeps
+  serializing the stored membership, so job payloads are unchanged.
 
 ## [0.3.0] - 2026-06-05
 
