@@ -63,12 +63,14 @@ module TenancyDable
           end
         end
 
-        # Create refusal (§16.2): a new record whose fk names a tenant other than
-        # the current one raises. Prepended so it runs before every validator
-        # (a uniqueness check would otherwise read first and raise the read
-        # error); the `before_create` twin covers `save(validate: false)`.
-        before_validation(on: :create, prepend: true) { tenancy_refuse_foreign_tenant!(fk) }
-        before_create(prepend: true) { tenancy_refuse_foreign_tenant!(fk) }
+        # Foreign-tenant refusal (§16.2): a write whose record names a tenant other
+        # than the current one raises, for a new record (create) and for a
+        # persisted one in hand (update, destroy). Prepended so it runs before every
+        # validator (a uniqueness check would otherwise read first and raise the
+        # read error); `before_save` covers `save(validate: false)`.
+        before_validation(prepend: true) { tenancy_refuse_foreign_tenant!(fk, new_record? ? :create : :update) }
+        before_save(prepend: true) { tenancy_refuse_foreign_tenant!(fk, new_record? ? :create : :update) }
+        before_destroy(prepend: true) { tenancy_refuse_foreign_tenant!(fk, :destroy) }
 
         # Auto-assign the fk from the current tenant on create when blank. Uses
         # `[]=` (write_attribute), bypassing the immutability writer below — and
@@ -141,17 +143,51 @@ module TenancyDable
       end
     end
 
+    # Callback-free writes of a record in hand (§16.2). They skip the callbacks
+    # above, so each checks on its own; the fk cannot be rewritten through
+    # `update_columns` / `update_column` (always, like the `tenant_id=` writer).
+    def touch(*, **)
+      tenancy_refuse_foreign_tenant!(TenancyDable.configuration.tenant_fk, :touch) if persisted?
+      super
+    end
+
+    def update_columns(attributes)
+      fk = TenancyDable.configuration.tenant_fk
+      if persisted?
+        pair = attributes.find { |key, _| key.to_s == fk.to_s }
+        if pair && pair.last.to_s != read_attribute(fk).to_s
+          raise TenancyDable::TenantImmutableError,
+            "#{self.class.name}##{fk} is immutable; a record's tenant cannot change after create"
+        end
+        tenancy_refuse_foreign_tenant!(fk, :update)
+      end
+      super
+    end
+
+    def delete
+      tenancy_refuse_foreign_tenant!(TenancyDable.configuration.tenant_fk, :delete) if persisted?
+      super
+    end
+
     private
 
-    # The create-refusal rule (§16.2, FROZEN). Ids only in the message (invariant 6).
-    def tenancy_refuse_foreign_tenant!(fk)
-      return if self[fk].blank? # blank: the auto-assign decides
+    # The foreign-tenant refusal (§16.2, FROZEN). Callback-free writes (`touch`,
+    # `update_columns`, `delete`) call it from their overrides. Ids only in the
+    # message (invariant 6).
+    def tenancy_refuse_foreign_tenant!(fk, action)
       return if TenancyDable::Current.tenant_scope_disabled # without_tenant
       return unless (active_tenant = TenancyDable.current_tenant)
-      return if self[fk].to_s == active_tenant.id.to_s
 
+      # A persisted record is judged by the tenant its row holds, not by an
+      # unsaved assignment; a new record by the fk it carries (blank: the
+      # auto-assign decides).
+      record_tenant_id = persisted? ? attribute_in_database(fk) : self[fk]
+      return if record_tenant_id.blank?
+      return if record_tenant_id.to_s == active_tenant.id.to_s
+
+      where = (action == :create) ? "in" : "of"
       raise TenancyDable::CrossTenantWriteError,
-        "refusing to create #{self.class.name} in tenant ##{self[fk]} while acting in " \
+        "refusing to #{action} #{self.class.name} #{where} tenant ##{record_tenant_id} while acting in " \
         "tenant ##{active_tenant.id}; enter the tenant with TenancyDable.with_tenant"
     end
   end

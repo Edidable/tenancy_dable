@@ -57,6 +57,20 @@ RSpec.describe "TenancyDable::Scoped — tenant_id assignment" do
       expect { widget.save! }.to raise_error(TenancyDable::TenantImmutableError)
     end
 
+    it "raises TenantImmutableError when update_columns rewrites the fk (§16.2)" do
+      widget = create(:widget, tenant: tenant_a)
+
+      expect { widget.update_columns(tenant_id: tenant_b.id) }.to raise_error(TenancyDable::TenantImmutableError)
+      expect(Widget.unscoped.find(widget.id).tenant_id).to eq(tenant_a.id)
+    end
+
+    it "raises TenantImmutableError when update_column rewrites the fk (§16.2)" do
+      widget = create(:widget, tenant: tenant_a)
+
+      expect { widget.update_column(:tenant_id, tenant_b.id) }.to raise_error(TenancyDable::TenantImmutableError)
+      expect(Widget.unscoped.find(widget.id).tenant_id).to eq(tenant_a.id)
+    end
+
     it "allows reassigning the SAME tenant_id to a persisted record (no-op)" do
       widget = create(:widget, tenant: tenant_a)
 

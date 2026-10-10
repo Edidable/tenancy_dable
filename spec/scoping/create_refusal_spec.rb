@@ -6,7 +6,8 @@ require "rails_helper"
 # `with_tenant(b)`, a new record whose fk names tenant A raises
 # CrossTenantWriteError, on every path that can write it and whatever validators
 # the model has (Widget validates uniqueness, Gadget has none), never the read
-# error, and nothing is written.
+# error, and nothing is written. The same rule for a persisted record in hand
+# lives in foreign_record_write_spec.rb, and for insert_all in insert_all_guard_spec.rb.
 RSpec.describe "TenancyDable::Scoped — create refusal" do
   let(:tenant_a) { create(:tenant) }
   let(:tenant_b) { create(:tenant) }
@@ -66,6 +67,13 @@ RSpec.describe "TenancyDable::Scoped — create refusal" do
             "tenant ##{tenant_b.id}; enter the tenant with TenancyDable.with_tenant"
           )
         }
+    end
+
+    it "refuses a new record with a foreign fk on every save path, valid or not" do
+      widget = Widget.new(name: "x", tenant_id: tenant_a.id)
+
+      expect { acting_in_b { widget.save } }.to raise_error(TenancyDable::CrossTenantWriteError)
+      expect(written_rows).to eq(0)
     end
 
     it "descends from TenancyDable::Error" do

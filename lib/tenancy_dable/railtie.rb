@@ -62,6 +62,11 @@ module TenancyDable
       # destroy_all via `super`. `Scoped` becomes available for host models to
       # `include` simply by being required above.
       ActiveRecord::Relation.prepend(TenancyDable::RelationExtension)
+
+      # `insert_all` / `upsert_all` build an `InsertAll` and skip every callback,
+      # so the create refusal cannot see them (§16.2); guard its initialization.
+      require "tenancy_dable/insert_all_extension"
+      ActiveRecord::InsertAll.prepend(TenancyDable::InsertAllExtension)
     end
 
     # Wire the slug-resolution concern (Phase 05) into ActionController so host
