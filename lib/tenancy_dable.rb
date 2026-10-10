@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "active_support/notifications"
 require "tenancy_dable/version"
 require "tenancy_dable/errors"
 require "tenancy_dable/configuration"
@@ -28,6 +29,15 @@ require "tenancy_dable/railtie"
 module TenancyDable
   # Instrumented by `without_tenant` (§16.5).
   WITHOUT_TENANT_EVENT = "without_tenant.tenancy_dable"
+
+  # The directory `call_site` skips (§16.5): frames inside the gem are not the
+  # caller of `without_tenant`.
+  LIB_DIR = "#{File.expand_path(__dir__)}/"
+  private_constant :LIB_DIR
+
+  UNSAFE_ISOLATION_MESSAGE = "tenant state written under a fiber scheduler with thread isolation; " \
+    "set config.active_support.isolation_level = :fiber"
+  private_constant :UNSAFE_ISOLATION_MESSAGE
 
   class << self
     # --- configuration -----------------------------------------------------
@@ -65,6 +75,7 @@ module TenancyDable
     # Assigning the same tenant, or setting from/to nil, is a normal
     # establish/clear and is never treated as an override.
     def current_tenant=(tenant)
+      check_isolation!
       previous = Current.tenant
       audit_override(previous, tenant)
       Current.tenant = tenant
@@ -87,6 +98,7 @@ module TenancyDable
     end
 
     def current_membership=(membership)
+      check_isolation!
       Current.membership = membership
     end
 
@@ -110,14 +122,29 @@ module TenancyDable
     # restoring the prior flag afterwards (nesting-safe). Returns the block's
     # value. Does not touch the tenant itself, so no audit/RLS hook fires.
     #
-    # `reason:` is accepted now; W4 fills in the reason check and the
-    # WITHOUT_TENANT_EVENT instrumentation (§16.5).
+    # Order (§16.5): the reason check, the isolation check, the event, then the
+    # flag. The event carries the host's reason, the tenant id and the call site,
+    # never a record (invariant 6).
     def without_tenant(reason: nil)
-      previous = Current.tenant_scope_disabled
-      Current.tenant_scope_disabled = true
-      yield
-    ensure
-      Current.tenant_scope_disabled = previous
+      if configuration.require_bypass_reason && (reason.nil? || reason.to_s.strip.empty?)
+        raise BypassReasonError,
+          "without_tenant requires a non-blank reason: (config.require_bypass_reason is on)"
+      end
+
+      check_isolation!
+      notifier = ActiveSupport::Notifications.notifier
+      if notifier.listening?(WITHOUT_TENANT_EVENT)
+        # No block on purpose: with one, a raising block would add its exception
+        # (which can carry a record) to the payload.
+        ActiveSupport::Notifications.instrument(
+          WITHOUT_TENANT_EVENT,
+          reason: reason,
+          tenant_id: Current.tenant&.id,
+          call_site: call_site
+        )
+      end
+
+      scope_disabled_as(true, check: false) { yield }
     end
 
     # --- context carrier and audit (v0.5.0; §16.3/§16.4) -------------------
@@ -157,6 +184,40 @@ module TenancyDable
     end
 
     private
+
+    # Sets the bypass flag for the block and restores the prior one in `ensure`.
+    # The only writer of `tenant_scope_disabled` (§16.4); `without_tenant` has
+    # already run the isolation check before its event, so it passes `check: false`.
+    def scope_disabled_as(value, check: true)
+      check_isolation! if check
+      previous = Current.tenant_scope_disabled
+      begin
+        Current.tenant_scope_disabled = value
+        yield
+      ensure
+        Current.tenant_scope_disabled = previous
+      end
+    end
+
+    # Isolation check (§16.4): runs first in every gem write to `Current`. Under a
+    # fiber scheduler with thread isolation every fiber on the thread shares one
+    # `Current`, a live cross-request leak.
+    def check_isolation!
+      mode = configuration.isolation_check
+      return if mode == :off
+      return unless Fiber.scheduler
+      return unless ActiveSupport::IsolatedExecutionState.isolation_level == :thread
+
+      raise UnsafeIsolationError, UNSAFE_ISOLATION_MESSAGE unless mode == :warn
+
+      logger&.warn("[TenancyDable] #{UNSAFE_ISOLATION_MESSAGE}")
+    end
+
+    # `"path:lineno"` of the first caller outside the gem, or nil (§16.5).
+    def call_site
+      location = caller_locations(1).find { |loc| !(loc.absolute_path || loc.path).to_s.start_with?(LIB_DIR) }
+      location && "#{location.absolute_path || location.path}:#{location.lineno}"
+    end
 
     # Audit policy for a `current_tenant=` reassignment (§4.2). Only a switch
     # between two DIFFERENT, non-nil tenants counts as an override; setting from
