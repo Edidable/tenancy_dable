@@ -146,4 +146,26 @@ RSpec.describe "TenancyDable::RelationExtension — bulk-write guard" do
       .not_to raise_error
     expect(Tenant.where(name: "After")).to be_present
   end
+
+  describe "the classifier on literal pins" do
+    it "writes through where(tenant_id: [b, b]) and refuses a list holding another tenant" do
+      mine = create(:widget, tenant: tenant_b, name: "mine")
+      create(:widget, tenant: tenant_a, name: "theirs")
+
+      TenancyDable.with_tenant(tenant_b) { Widget.where(tenant_id: [tenant_b.id, tenant_b.id]).update_all(name: "renamed") }
+      expect(mine.reload.name).to eq("renamed")
+
+      expect { TenancyDable.with_tenant(tenant_b) { Widget.unscoped.where(tenant_id: [tenant_b.id, tenant_a.id]).delete_all } }
+        .to raise_error(TenancyDable::BulkWriteError)
+    end
+
+    it "refuses an Arel equality on the fk against a subquery" do
+      subquery = Tenant.where(id: tenant_a.id).select(:id).arel
+      create(:widget, tenant: tenant_a, name: "theirs")
+
+      expect { TenancyDable.with_tenant(tenant_b) { Widget.unscoped.where(Widget.arel_table[:tenant_id].eq(subquery)).delete_all } }
+        .to raise_error(TenancyDable::BulkWriteError)
+      expect(Widget.unscoped.where(name: "theirs").count).to eq(1)
+    end
+  end
 end

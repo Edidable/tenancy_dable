@@ -167,4 +167,76 @@ RSpec.describe "TenancyDable::Scoped — writes to a record of another tenant" d
       expect(row).to include("tenant_id" => tenant_a.id, "name" => "same")
     end
   end
+
+  describe "records read with a partial select, in their own tenant" do
+    def partial(*columns) = TenancyDable.with_tenant(tenant_a) { Gadget.select(*columns).find(gadget_a.id) }
+
+    it "destroys through select(:id).find_each" do
+      TenancyDable.with_tenant(tenant_a) { Gadget.select(:id).find_each(&:destroy) }
+
+      expect(TenancyDable.without_tenant { Gadget.where(id: gadget_a.id).count }).to eq(0)
+    end
+
+    it "touches, deletes and saves without validation" do
+      TenancyDable.with_tenant(tenant_a) do
+        expect(Gadget.select(:id, :updated_at).find(gadget_a.id).touch).to be(true)
+        expect(Gadget.select(:id, :name).find(gadget_a.id).save(validate: false)).to be(true)
+        Gadget.select(:id).find(gadget_a.id).delete
+      end
+
+      expect(TenancyDable.without_tenant { Gadget.where(id: gadget_a.id).count }).to eq(0)
+    end
+
+    it "still refuses a partial record of another tenant" do
+      record = partial(:id)
+
+      expect { acting_in_b { record.destroy } }
+        .to raise_error(TenancyDable::CrossTenantWriteError, refusal(:destroy))
+    end
+  end
+
+  describe "the tenant fk judged by the row, not by an unsaved assignment" do
+    before { tenant_b }
+
+    it "refuses update_column after record.tenant = other" do
+      record = TenancyDable.with_tenant(tenant_a) { Gadget.find(gadget_a.id) }
+      record.tenant = tenant_b
+
+      expect { TenancyDable.with_tenant(tenant_a) { record.update_column(:tenant_id, record.tenant_id) } }
+        .to raise_error(TenancyDable::TenantImmutableError)
+      expect(row["tenant_id"]).to eq(tenant_a.id)
+    end
+
+    it "refuses update_columns after record[:tenant_id] = other.id" do
+      record = TenancyDable.with_tenant(tenant_a) { Gadget.find(gadget_a.id) }
+      record[:tenant_id] = tenant_b.id
+
+      expect { TenancyDable.with_tenant(tenant_a) { record.update_columns(tenant_id: tenant_b.id) } }
+        .to raise_error(TenancyDable::TenantImmutableError)
+      expect(row["tenant_id"]).to eq(tenant_a.id)
+    end
+
+    it "refuses a rewrite through an attribute alias and through a case variant" do
+      stub_const("AliasedGadget", Class.new(ApplicationRecord) do
+        self.table_name = "gadgets"
+        include TenancyDable::Scoped
+
+        belongs_to_tenant
+        alias_attribute :workspace_id, :tenant_id
+
+        def self.name = "AliasedGadget"
+      end)
+      record = TenancyDable.with_tenant(tenant_a) { AliasedGadget.find(gadget_a.id) }
+
+      TenancyDable.with_tenant(tenant_a) do
+        expect { record.update_columns(workspace_id: tenant_b.id) }.to raise_error(TenancyDable::TenantImmutableError)
+        expect { record.update_columns("TENANT_ID" => tenant_b.id) }.to raise_error(TenancyDable::TenantImmutableError)
+        expect { AliasedGadget.where(id: gadget_a.id).update_all(workspace_id: tenant_b.id) }
+          .to raise_error(TenancyDable::TenantImmutableError)
+        expect { AliasedGadget.where(id: gadget_a.id).update_all("TENANT_ID" => tenant_b.id) }
+          .to raise_error(TenancyDable::TenantImmutableError)
+      end
+      expect(row["tenant_id"]).to eq(tenant_a.id)
+    end
+  end
 end

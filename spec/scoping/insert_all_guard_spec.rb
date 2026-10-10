@@ -175,4 +175,34 @@ RSpec.describe "TenancyDable::InsertAllExtension" do
       expect(Tenant.find_by(slug: "one").name).to eq("renamed")
     end
   end
+
+  describe "empty inserts and composite primary keys" do
+    it "no-ops insert_all([]) and upsert_all([]) inside a tenant" do
+      expect { acting_in_b { Widget.insert_all([]) } }.not_to raise_error
+      expect { acting_in_b { Widget.upsert_all([]) } }.not_to raise_error
+    end
+
+    it "accepts upsert_all with no unique_by when the primary key spans the fk" do
+      ActiveRecord::Base.connection.create_table(:cpk_items, primary_key: [:tenant_id, :id], force: true) do |t|
+        t.integer :tenant_id, null: false
+        t.integer :id, null: false
+        t.string :name
+      end
+      stub_const("CpkItem", Class.new(ApplicationRecord) do
+        self.table_name = "cpk_items"
+        include TenancyDable::Scoped
+
+        belongs_to_tenant
+
+        def self.name = "CpkItem"
+      end)
+
+      acting_in_b do
+        expect { CpkItem.upsert_all([{id: 1, name: "x"}]) }.not_to raise_error
+        expect(CpkItem.pluck(:name)).to eq(["x"])
+      end
+    ensure
+      ActiveRecord::Base.connection.drop_table(:cpk_items, if_exists: true)
+    end
+  end
 end

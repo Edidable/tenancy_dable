@@ -27,19 +27,25 @@ module TenancyDable
       TenancyDable::Railtie.install_action_controller!
     end
 
-    # The gem's own validation messages (§16.6). Registered the way Active Model
-    # registers its defaults: appended to `I18n.load_path` here, before
-    # `I18n::Railtie.initialize_i18n` adds the host's `config/locales` and
-    # `config.i18n.load_path` after them, so a host file for the same key wins.
+    # The gem's own validation messages (§16.6). PREPENDED to `I18n.load_path`
+    # (a later file wins), so a host file for the same key wins however the host
+    # registered it: `config/locales` and `config.i18n.load_path` are added by
+    # `I18n::Railtie.initialize_i18n` after this, and a direct append in the
+    # application class body is already in the list.
     # The initializer runs where the host's `config.i18n` is known, which is how
     # `pt-BR` stays out of an English-only host's `I18n.available_locales`.
     initializer "tenancy_dable.i18n" do |app|
       files = TenancyDable::Railtie.locale_files(app.config.i18n)
-      ActiveSupport.on_load(:i18n) { I18n.load_path |= files }
+      ActiveSupport.on_load(:i18n) { TenancyDable::Railtie.prepend_load_path(files) }
     end
 
     rake_tasks do
       load File.expand_path("tasks/audit.rake", __dir__)
+    end
+
+    # Put `files` first in `I18n.load_path`, moving them if already present. :nodoc:
+    def self.prepend_load_path(files)
+      I18n.load_path = files + (I18n.load_path - files)
     end
 
     # The gem's locale files for a host's `config.i18n` (§16.6): `en` always,

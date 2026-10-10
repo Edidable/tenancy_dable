@@ -391,8 +391,8 @@ is current at the moment of the read.
 
 Documented residuals (see the README): `Model.unscoped` with **no** tenant
 predicate passes, but `Model.unscoped.where(tenant_id: other.id)` is refused like
-any other pin; `except(:where)`, `only(...)`, an `or` with an unscoped relation,
-SQL-string predicates, raw SQL, `reload` by id, and the cache key of an association
+any other pin; `except(:where)`, `only(...)`, an `or` with an unscoped or a stale relation,
+SQL-string predicates, raw SQL strings, `reload` by id, and the cache key of an association
 that is already loaded.
 
 **`update_all(tenant_id: ...)` raises `TenantImmutableError`**, like the
@@ -484,11 +484,15 @@ overridden at any level of Active Model's lookup
 
 Three host-visible details:
 
-- **Your locale files win.** A host file defining the same key overrides the gem's.
+- **Your locale files win.** A host file defining the same key overrides the gem's, however it is registered (`config/locales`, `config.i18n.load_path`, or a direct `I18n.load_path <<`).
 - **`pt-BR` loads only when the host declares it**, in `config.i18n.default_locale`
   or `config.i18n.available_locales` in `config/application.rb` (an initializer runs
   too late to be seen). An English-only host's `I18n.available_locales` does not
-  gain `pt-BR`.
+  gain `pt-BR`. A `pt-BR` host that sets its locales only in
+  `config/initializers/locale.rb` therefore gets no `pt-BR` file and sees
+  `Translation missing: pt-BR.errors.messages.cross_tenant` where 0.4.0 showed
+  English; declare `config.i18n.default_locale = :"pt-BR"` (or the
+  `available_locales`) in `config/application.rb`, or add your own translations.
 - **A `pt-BR` host now sees Portuguese** where 0.4.0 showed English for the
   last-owner, slug-format and cross-tenant messages (those were literal English in
   0.4.0 whatever the locale). A page, or a spec that asserts the English text,

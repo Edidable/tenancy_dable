@@ -119,4 +119,26 @@ RSpec.describe "TenancyDable validation messages (i18n)" do
       expect(bad_slug_tenant.errors.details[:slug]).to include(a_hash_including(error: :invalid))
     end
   end
+
+  describe "prepend wiring (N6)" do
+    around do |example|
+      saved = I18n.load_path.dup
+      example.run
+    ensure
+      I18n.load_path = saved
+      I18n.backend.reload!
+    end
+
+    it "moves the gem's files ahead of a host file appended earlier, so the host still wins" do
+      files = TenancyDable::Railtie.locale_files(ActiveSupport::OrderedOptions.new)
+      host = File.expand_path("../internal/config/locales/en.yml", __dir__)
+      I18n.load_path = [host, *files]
+
+      TenancyDable::Railtie.prepend_load_path(files)
+
+      expect(I18n.load_path.first(files.size)).to eq(files)
+      expect(I18n.load_path.index(files.first)).to be < I18n.load_path.index(host)
+      expect(I18n.load_path.count(files.first)).to eq(1)
+    end
+  end
 end

@@ -16,10 +16,12 @@ module TenancyDable
   # bypass off (no tenant and `without_tenant` pass through):
   #   * every row's effective fk (scope attribute over row value) is the current
   #     tenant's id;
-  #   * an upsert resolves a `unique_by` index that includes the fk. Anything else
-  #     (the primary key, an index spanning tenants, an adapter with no conflict
-  #     target) lets the conflict UPDATE reach a row of another tenant, and the
-  #     tenant column with it.
+  #   * an upsert's conflict columns include the fk: the `unique_by` index, or the
+  #     primary key when there is none and the adapter has conflict targets (a
+  #     composite `[tenant_id, id]` passes). Anything else (a primary key without
+  #     the fk, an index spanning tenants, an adapter with no conflict target)
+  #     lets the conflict UPDATE reach a row of another tenant, and the tenant
+  #     column with it.
   module InsertAllExtension
     def initialize(...)
       super
@@ -32,6 +34,8 @@ module TenancyDable
       return unless model.respond_to?(:tenant_scoped?) && model.tenant_scoped?
       return if TenancyDable::Current.tenant_scope_disabled
       return unless (active_tenant = TenancyDable.current_tenant)
+
+      return if inserts.empty? # Rails no-ops
 
       fk = TenancyDable.configuration.tenant_fk.to_s
       scope_attributes = @scope_attributes || {}
@@ -47,7 +51,14 @@ module TenancyDable
 
       return unless on_duplicate == :update
 
-      conflict_columns = Array(unique_by&.columns).map(&:to_s)
+      # No `unique_by`: the adapter's conflict target is the primary key, which
+      # passes when it spans the fk (a composite `[tenant_id, id]`).
+      conflict_columns =
+        if unique_by.nil? && connection.supports_insert_conflict_target?
+          Array(model.primary_key).map(&:to_s)
+        else
+          Array(unique_by&.columns).map(&:to_s)
+        end
       return if conflict_columns.include?(fk)
 
       raise TenancyDable::CrossTenantWriteError,

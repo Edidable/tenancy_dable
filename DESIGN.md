@@ -3,7 +3,7 @@
 > **Status: frozen.** This document expands `.midgal/PLAN.md` (the authoritative
 > contract) into the per-symbol, per-file design that **every later phase
 > implements verbatim**. Phase 00 writes no production code. If a phase must
-> deviate, it records the reason in the [Deviations](#10-deviations--observations)
+> deviate, it records the reason in the [Deviations](#10-deviations--observations-from-planmd)
 > section below and **keeps the public surface unchanged**.
 >
 > **v0.2.0 (nits run):** three additive fixes amend this contract — see §13. The
@@ -965,31 +965,41 @@ def tenancy_pin_state(active_tenant) #=> :current | :other | :removed | :unpinne
 ```
 
 ```
-fk     = config.tenant_fk.to_s
-pinned = where_values_hash[fk]   # top-level equality / IN predicates on klass.table_name;
-                                 # when several constrain fk, the last one wins
-:current   if !pinned.nil? && pinned.to_s == active_tenant.id.to_s
-:other     if !pinned.nil?       # another id, or an Array (an IN list is a multi-tenant
-                                 # read, even when it contains the current id)
-:removed   if the relation is_a?(TenancyDable::BuiltWithoutTenant)
-           #   (built with no current tenant, or inside without_tenant; see the marker
-           #    below). Checked AFTER the two pin tests, so a marked relation pinned to
-           #    the current tenant is :current
+fk   = config.tenant_fk.to_s
+pins = the LITERAL pins of fk: the values of the top-level conjuncts of
+       where_clause.ast (recursing into Arel::Nodes::And) that are equality?
+       nodes whose left is an Arel::Attributes::Attribute named fk on
+       klass.table_name, read as right.value_before_type_cast (or the list of
+       them). A right side with no bound value (a subquery, a column, an
+       Arel.sql literal) is NOT a pin. where_values_hash is never read: it
+       raises NoMethodError on `lower(name) = ?` (Rails' case_sensitive: false
+       uniqueness), and its last-wins value hides a current pin behind a
+       non-literal equality (an eager_load join `tenant_id = tenants.id`) or
+       reports nil for a subquery.
+:other     if a literal pin is another id, or a list that holds any value that is
+           #   neither nil nor the current id (a multi-tenant read, even when it
+           #   contains the current id)
+:current   if a literal pin is the current id, or a list whose non-nil values are
+           #   all the current id ([current, current], [current, nil]) or that is
+           #   empty ([] reads nothing): the conjunct confines the rows
+:removed   if the relation is_a?(TenancyDable::BuiltWithoutTenant) or its
+           #   extending_values include the module (built with no current tenant,
+           #   or inside without_tenant; see the marker below; extending_values
+           #   survives `dup`, which drops the singleton extension). Checked AFTER
+           #   the two pin tests, so a marked relation pinned to the current tenant
+           #   is :current
 :removed   if unscope_values contains :where, or a {where: targets} where any target
            #   names fk. A target is a Symbol/String/Arel attribute, a list of them, or
            #   a table-keyed Hash ({widgets: :tenant_id}, {"widgets" => ["tenant_id"]},
            #   also inside a list), flattened to its column names first. A Symbol/String
            #   compares its last "."-separated segment, so "widgets.tenant_id" counts; an
            #   Arel attribute compares #name, which is how rewhere records its removals
-:removed   if where_values_hash has NO key for fk and ANY top-level predicate of the
-           #   where clause references klass.table_name's fk (`!=`, NOT, a range, a
-           #   subquery, an `or` Grouping: whatever replaced the default scope's equality).
-           #   The one exception is an explicit nil pin: when the key IS present,
-           #   a top-level Arel::Nodes::Equality (`IS NULL`) is not counted, so
-           #   `where(tenant_id: nil)` stays :unpinned. The key alone cannot tell the two
-           #   apart, because where_values_hash also reports nil for an `In` subquery on
-           #   the fk, so any other top-level node mentioning the fk is :removed even
-           #   when the key is present.
+:removed   if ANY top-level predicate of the where clause other than a literal nil
+           #   pin references klass.table_name's fk (`!=`, NOT, a range, a subquery,
+           #   an Arel equality on a non-literal, an `or` Grouping: whatever replaced
+           #   the default scope's equality). The one exception is an Equality on the
+           #   fk whose literal value is nil (`IS NULL`), so `where(tenant_id: nil)`
+           #   stays :unpinned.
            #   Top-level predicates are where_clause.ast.children when the ast is an
            #   Arel::Nodes::And, else [where_clause.ast]. The walk is duck-typed so it
            #   covers 7.1 (Or < Binary: left/right) and 7.2+ (Or < Nary: children):
@@ -1017,6 +1027,9 @@ so `rewhere(tenant_id: current.id)` and `unscope(where: :tenant_id).where(tenant
 current.id)` read only the current tenant and pass (measured). A `nil` pin
 (`where(tenant_id: nil)`, or an unsaved owner's association) is `:unpinned`: the
 default scope's predicate is still ANDed in, so it returns nothing (measured).
+A pin to the current tenant also wins over a non-literal equality beside it, which
+is what lets `Tenant.where(id: b).eager_load(:widgets)` through: its Widget join
+scope is `tenant_id = B AND widgets.tenant_id = tenants.id`.
 
 **Read-guard decision tree (FROZEN):**
 
@@ -1039,7 +1052,7 @@ messages. `config.guard_reads` does not affect it.
 **`update_all` refuses a tenant FK rewrite (invariant 3).** After the bulk guard,
 `update_all(updates)` raises `TenantImmutableError` when `updates` is a Hash whose
 keys include the tenant FK (String or Symbol; a key compares its last
-"."-separated segment), whatever value it carries, except inside `without_tenant`.
+"."-separated segment, case-insensitively, after resolving `alias_attribute`), whatever value it carries, except inside `without_tenant`.
 It runs for a tenant-scoped model only. The SQL-string and Array forms name no
 column the gem can see and stay a residual.
 
@@ -1064,7 +1077,9 @@ another tenant whose `dependent:` associations must be loaded, and an `or` that
 mixes the tenant predicate into a disjunction. Also refused, since the classifier
 counts any FK predicate that is not an equality pin: `invert_where` (on a host scope
 or on `Widget`), `Widget.unscoped.where.not(tenant_id: x)`, a range on the FK merged
-in, and `Widget.unscoped.where(tenant_id: <subquery>)`; a relation built before the
+in, and `Widget.unscoped.where(tenant_id: <subquery>)` and its Arel twin
+`unscoped.where(arel_table[:tenant_id].eq(<subquery>))`, an Arel equality against a
+column or an `Arel.sql` literal; a relation built before the
 tenant was entered (marker above); a table-keyed `unscope(where: {widgets:
 :tenant_id})`; the cache key / version of an unloaded relation; a scoped relation
 embedded in a subquery, `from` or CTE of any model; and `to_sql` / `arel` of a
@@ -1082,9 +1097,13 @@ recorded no removal is indistinguishable from `Model.unscoped`, and passes:
 `Model.unscoped` with no FK predicate (and `Model.unscoped { }`), `except(:where)`,
 `only(...)` without `:where`, and an `or` with such a relation
 (`Widget.all.or(Widget.unscope(where: :tenant_id))`, whose disjunction Active
-Record collapses to "no predicate"). So do SQL-string predicates
-(`where("tenant_id = ?", x)`, and a SQL-string `update_all`), raw SQL
-(`find_by_sql`, `connection.select_all`), `reload` by id (it runs inside
+Record collapses to "no predicate"), including `Widget.where.not(name: nil).or(stale)`
+where `stale` is a relation built before the tenant was entered: `WhereClause#or`
+keeps only the predicates both sides share, so the receiver's tenant pin is dropped
+and `or!` does not carry the marker. So do SQL-string predicates
+(`where("tenant_id = ?", x)`, and a SQL-string `update_all`), raw SQL strings
+(`find_by_sql`, `connection.select_all` with a String; a relation passed to
+`select_all` is compiled through `arel` and refused), `reload` by id (it runs inside
 `unscoped { }` and is a read of the row the record already is), and the cache key
 of an already-loaded association target (no query runs; it reads the records
 already in memory). All of these are explicit relation surgery; the guard targets
@@ -1093,7 +1112,7 @@ the shapes Active Record produces on its own (association merge, `rewhere`,
 
 **Error.** `TenancyDable::CrossTenantReadError < TenancyDable::Error`, sibling of
 `BulkWriteError`. Message: `"refusing to read #{klass.name} "` followed by
-`"pinned to tenant #{pinned.inspect}"` (`:other`) or `"with the tenant filter
+`"pinned to tenant #{other_pin.inspect}"` (`:other`) or `"with the tenant filter
 removed"` (`:removed`), then `" while acting in tenant ##{current.id}; enter the
 tenant with TenancyDable.with_tenant, or wrap a deliberate cross-tenant read in
 TenancyDable.without_tenant"`. Model name and tenant ids only (invariant 6).
@@ -1146,9 +1165,14 @@ action)` runs, with `action` one of `:create :update :destroy :touch :delete`:
 ```
 return IF Current.tenant_scope_disabled          # without_tenant
 return IF TenancyDable.current_tenant.nil?       # no current tenant: unchanged
-tenant_id = persisted? ? attribute_in_database(fk) : self[fk]
+tenant_id = persisted? ? row_tenant_id : self[fk]
                                                  # a persisted record is judged by the tenant its
-                                                 # row holds, not by an unsaved assignment
+                                                 # row holds, not by an unsaved assignment:
+                                                 #   has_attribute?(fk) ? attribute_in_database(fk)
+                                                 #     : unscoped.where(pk => id).pick(fk)
+                                                 # (a partial `select` without the fk loads the
+                                                 # row's tenant; `unscoped` keeps the lookup out
+                                                 # of the read guard)
 return IF tenant_id.blank?                       # new record, blank FK: auto-assign decides
 return IF tenant_id.to_s == current_tenant.id.to_s
 raise CrossTenantWriteError
@@ -1178,8 +1202,11 @@ setting for it: like immutability (invariant 3) it is a rule, and the local esca
 is explicit (`with_tenant(target) { create }`, or `without_tenant { create }`).
 
 **`update_columns` cannot rewrite the tenant (invariant 3).** On a persisted
-record, `update_columns` / `update_column` with the FK among the keys and a value
-different from `read_attribute(fk)` raise `TenantImmutableError`, always (no
+record, `update_columns` / `update_column` with the FK among the keys (resolving
+`alias_attribute` and comparing column names case-insensitively) and a value
+different from the ROW's tenant (the same lookup as above, not `read_attribute`,
+which an unsaved `record.tenant = other` or `record[:fk] = x` has already moved)
+raise `TenantImmutableError`, always (no
 current tenant, and inside `without_tenant`, included), like the `tenant_id=`
 writer. The same value passes. The Hash form of `update_all` has the same refusal
 (§16.1).
@@ -1201,14 +1228,18 @@ raises `CrossTenantWriteError` on either rule:
    value) must equal the current tenant's id. A row with no tenant is refused too
    ("into no tenant"), and a mixed batch writes nothing. Plain `insert_all`
    (skip) and `insert_all!` (raise) need only this rule.
-2. **Upsert rule.** When `on_duplicate == :update`, the resolved `unique_by`
-   index columns must include the FK. A primary-key conflict can always reach
-   another tenant's row, as can an index that spans tenants, and the conflict
+2. **Upsert rule.** When `on_duplicate == :update`, the conflict columns must
+   include the FK: the resolved `unique_by` index, or, with no `unique_by` and an
+   adapter with conflict targets (`supports_insert_conflict_target?`), the model's
+   primary key (so a composite `[tenant_id, id]` passes). A primary-key conflict
+   without the FK in the key can reach another tenant's row, as can an index that
+   spans tenants, and the conflict
    UPDATE then rewrites that row and its tenant column. On an adapter without
    conflict targets (MySQL), `unique_by` resolves to nothing, so every upsert on a
    scoped model inside a tenant is refused. A custom `on_duplicate` SQL string
    cannot be inspected; it is covered only by this rule.
 
+An empty batch (`insert_all([])`, `upsert_all([])`) is not inspected: Rails no-ops.
 Messages name ids only (invariant 6). The first-draft note that `insert_all`
 "cannot create into another tenant" and that `upsert_all` is "not guarded" is
 withdrawn: `Widget.insert_all` applies the default scope's attributes (so a row
@@ -1673,7 +1704,11 @@ Model's lookup chain, so every host override wins, from the most specific
 ```ruby
 initializer "tenancy_dable.i18n" do |app|
   files = TenancyDable::Railtie.locale_files(app.config.i18n)
-  ActiveSupport.on_load(:i18n) { I18n.load_path |= files }
+  ActiveSupport.on_load(:i18n) { TenancyDable::Railtie.prepend_load_path(files) }
+end
+
+def self.prepend_load_path(files)   # :nodoc:
+  I18n.load_path = files + (I18n.load_path - files)
 end
 
 def self.locale_files(i18n_config)   # :nodoc:
@@ -1686,11 +1721,14 @@ end
 is appended to `I18n.load_path` AFTER the host's own `config/locales` paths, so
 the gem's file won and a host could not override a key (V2 B2, measured). Active
 Model registers its own defaults the other way round, and so does the gem now:
-`on_load(:i18n)` runs when I18n is first used, appending the gem's files to
-`I18n.load_path` before `I18n::Railtie.initialize_i18n` adds the host's
-`config/locales` and `config.i18n.load_path`. The gem's files therefore sit BEFORE
-the host's, a host file for the same key is loaded later and wins, at every level
-of the lookup chain above.
+`on_load(:i18n)` runs when I18n is first used, and PREPENDS the gem's files to
+`I18n.load_path` (moving them if present). The gem's files therefore sit BEFORE
+every host file, however the host registered it: `config/locales` and
+`config.i18n.load_path` are added by `I18n::Railtie.initialize_i18n` after the
+hook, and a direct `I18n.load_path << file` in the application class body (or
+before the gem is required) is already in the list, where a plain append by the
+gem would have landed after it and won (V3 N6, measured). A host file for the
+same key is loaded later and wins, at every level of the lookup chain above.
 
 *Conditional `pt-BR`.* Loading `pt-BR.yml` unconditionally added `pt-BR` to
 `I18n.available_locales` of every host. `locale_files` keeps it out of an
@@ -1699,8 +1737,10 @@ English-only host: `pt-BR` loads only when the host declares it in
 therefore sees Portuguese defaults instead of Rails' translation-missing text. The
 initializer reads `app.config.i18n` at initializer time, so the declaration must
 be in `config/application.rb` or `config/environments/*.rb`; a setting made only in
-`config/initializers/*.rb` runs after the railtie's initializers and is not seen
-(that host adds the file itself or declares the locale earlier). The harness
+`config/initializers/*.rb` runs after the railtie's initializers and is not seen:
+that host gets no `pt-BR` file and sees `Translation missing:
+pt-BR.errors.messages.cross_tenant` (0.4.0 showed English) until it declares the
+locale earlier or adds the file itself. The harness
 declares `config.i18n.available_locales = [:en, :"pt-BR"]`.
 
 **Compatibility.** `CrossTenantError::MESSAGE` stays, as a compatibility constant

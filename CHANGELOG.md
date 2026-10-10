@@ -12,7 +12,10 @@ derived edidable projects, see [UPGRADING.md](UPGRADING.md).
 To be released as `0.5.0`. See [UPGRADING.md](UPGRADING.md#upgrading-to-v050).
 
 Three changes are **on by default and can raise in a host that works today**: the read
-guard, the refusal to create into another tenant, and the fiber isolation check. Each
+guard, the refusal to WRITE into another tenant (create, update, destroy, `touch`,
+`delete`, `update_columns`, `insert_all`, `upsert_all`), and the fiber isolation check.
+A `TenancyDable::Job` whose tenant vanished before it ran also raises
+`TenantNotFoundError` now, instead of running with no tenant. Each
 refuses a cross-tenant leak that 0.4.0 let through, and each has an escape hatch
 (`guard_reads = false`, `isolation_check = :warn`/`:off`, or a local
 `with_tenant(other) { ... }` / `without_tenant { ... }`). Everything else is additive.
@@ -56,8 +59,8 @@ see [UPGRADING.md](UPGRADING.md#pre-10-caveat)). The contract is
   `TenantImmutableError`.**
 - The guard targets the shapes Active Record produces on its own. Explicit relation
   surgery stays possible and is documented as a residual: `Model.unscoped` with no
-  tenant predicate, `except(:where)`, `only`, an `or` with an unscoped relation,
-  SQL-string predicates, raw SQL, `reload` by id and the cache key of an already
+  tenant predicate, `except(:where)`, `only`, an `or` with an unscoped or a stale relation,
+  SQL-string predicates, raw SQL strings, `reload` by id and the cache key of an already
   loaded association (see the README).
 
 ### Added

@@ -154,8 +154,13 @@ module TenancyDable
     def update_columns(attributes)
       fk = TenancyDable.configuration.tenant_fk
       if persisted?
-        pair = attributes.find { |key, _| key.to_s == fk.to_s }
-        if pair && pair.last.to_s != read_attribute(fk).to_s
+        pair = attributes.find do |key, _|
+          name = key.to_s
+          self.class.attribute_aliases.fetch(name, name).casecmp?(fk.to_s)
+        end
+        # compared with the row's tenant: an unsaved `record.tenant = other` has
+        # already moved read_attribute
+        if pair && pair.last.to_s != tenancy_row_tenant_id(fk).to_s
           raise TenancyDable::TenantImmutableError,
             "#{self.class.name}##{fk} is immutable; a record's tenant cannot change after create"
         end
@@ -171,6 +176,15 @@ module TenancyDable
 
     private
 
+    # The tenant the row holds. A record read without the fk column (a partial
+    # `select`) has no value to judge, so the row is looked up `unscoped`, which
+    # keeps the lookup out of the read guard.
+    def tenancy_row_tenant_id(fk)
+      return attribute_in_database(fk) if has_attribute?(fk)
+
+      self.class.unscoped.where(self.class.primary_key => id).pick(fk)
+    end
+
     # The foreign-tenant refusal (§16.2, FROZEN). Callback-free writes (`touch`,
     # `update_columns`, `delete`) call it from their overrides. Ids only in the
     # message (invariant 6).
@@ -181,7 +195,7 @@ module TenancyDable
       # A persisted record is judged by the tenant its row holds, not by an
       # unsaved assignment; a new record by the fk it carries (blank: the
       # auto-assign decides).
-      record_tenant_id = persisted? ? attribute_in_database(fk) : self[fk]
+      record_tenant_id = persisted? ? tenancy_row_tenant_id(fk) : self[fk]
       return if record_tenant_id.blank?
       return if record_tenant_id.to_s == active_tenant.id.to_s
 

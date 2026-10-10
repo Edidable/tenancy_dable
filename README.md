@@ -179,9 +179,9 @@ TenancyDable.without_tenant(reason: "usage report") { Widget.where(tenant_id: [a
 The guard targets the shapes Active Record produces on its own, and its **documented residuals** are explicit relation surgery:
 
 - `Widget.unscoped` (and `unscoped { }`) with **no** tenant predicate, the Active Record bypass the guard must keep working. `Widget.unscoped.where(tenant_id: other.id)` is refused like any other pin;
-- `except(:where)`, `only(...)`, and an `or` with an unscoped relation;
+- `except(:where)`, `only(...)`, and an `or` with an unscoped relation or with a stale one (`Widget.where.not(name: nil).or(stale)`, where `stale` was built before the tenant was entered: Active Record's `or` keeps only the predicates both sides share, so the tenant pin is dropped);
 - SQL-string predicates, such as `where("tenant_id = ?", x)`, and SQL-string `update_all`;
-- raw SQL: `find_by_sql`, `connection.select_all`;
+- raw SQL strings: `find_by_sql`, `connection.select_all` with a String (a relation passed to `select_all` is refused);
 - `reload` by id, and the cache key of an association that is already loaded (no query runs, so nothing is read that was not already in memory).
 
 A global `validates :code, uniqueness: true` on a scoped model builds on `unscoped`, so it reveals whether another tenant holds a value. That is a host choice, not guarded; use `validates_uniqueness_to_tenant` to scope it.
@@ -260,7 +260,7 @@ Write tenant state only through the facade (`TenancyDable.current_tenant=`, `wit
 
 #### Localizing messages
 
-The gem's three validation messages are I18n keys under `errors.messages`: `cross_tenant`, `last_owner` and `slug_format`. It ships `en` and `pt-BR`. `en` always loads; `pt-BR` loads only when the host declares it in `config.i18n.default_locale` or `config.i18n.available_locales` in `config/application.rb` (not in an initializer, which runs too late), so an English-only host's `I18n.available_locales` does not gain `pt-BR`. The host's own locale files win over the gem's for the same key. For any other locale, translate the keys, or enable fallbacks that reach `:en` (`config.i18n.fallbacks = [:en]`; plain `fallbacks = true` falls back to your default locale only), or override them at any level of Active Model's lookup:
+The gem's three validation messages are I18n keys under `errors.messages`: `cross_tenant`, `last_owner` and `slug_format`. It ships `en` and `pt-BR`. `en` always loads; `pt-BR` loads only when the host declares it in `config.i18n.default_locale` or `config.i18n.available_locales` in `config/application.rb` (not in an initializer, which runs too late), so an English-only host's `I18n.available_locales` does not gain `pt-BR`. The host's own locale files win over the gem's for the same key, however the host registers them (`config/locales`, `config.i18n.load_path`, or a direct `I18n.load_path <<`). A `pt-BR` host that sets its locale only in `config/initializers` gets no `pt-BR` file and sees `Translation missing: pt-BR.errors.messages.cross_tenant`; declare the locale in `config/application.rb`. For any other locale, translate the keys, or enable fallbacks that reach `:en` (`config.i18n.fallbacks = [:en]`; plain `fallbacks = true` falls back to your default locale only), or override them at any level of Active Model's lookup:
 
 ```yaml
 es:
@@ -472,7 +472,7 @@ Every error subclasses `TenancyDable::Error`, so a host can `rescue TenancyDable
 | `CrossTenantReadError` | a scoped read pinned to another tenant, or with its tenant filter removed, while a tenant is current |
 | `CrossTenantWriteError` | creating, updating, destroying, touching or deleting another tenant's record, or an `insert_all` / upsert that could reach one, while a tenant is current |
 | `UnsafeIsolationError` | tenant state written under a fiber scheduler with thread isolation (`isolation_check == :raise`) |
-| `BypassReasonError` | `without_tenant` without a reason while `require_bypass_reason` is on |
+| `BypassReasonError` | `without_tenant` without a reason while `require_bypass_reason` is on, or with a `reason:` that is not nil, a String or a Symbol |
 | `ConfigurationError` | invalid configuration, or an invalid or repeated tenancy declaration |
 
 ## Security invariants

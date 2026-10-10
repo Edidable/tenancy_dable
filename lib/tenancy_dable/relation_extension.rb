@@ -9,6 +9,10 @@ module TenancyDable
   module BuiltWithoutTenant
   end
 
+  # A where-clause right side that is not a bound value (§16.1).
+  NOT_LITERAL = Object.new.freeze
+  private_constant :NOT_LITERAL
+
   # Bulk-write guard, prepended to `ActiveRecord::Relation` by the railtie
   # (DESIGN.md §5.2). `update_all` / `delete_all` / `destroy_all` skip the
   # default scope's SQL `WHERE`, so without this a stray bulk write could touch
@@ -102,7 +106,7 @@ module TenancyDable
       return unless state == :other || state == :removed
 
       detail = if state == :other
-        "pinned to tenant #{where_values_hash[TenancyDable.configuration.tenant_fk.to_s].inspect}"
+        "pinned to tenant #{tenancy_other_pin(TenancyDable.configuration.tenant_fk.to_s, active_tenant).inspect}"
       else
         "with the tenant filter removed"
       end
@@ -139,31 +143,88 @@ module TenancyDable
       return if TenancyDable::Current.tenant_scope_disabled
 
       fk = TenancyDable.configuration.tenant_fk.to_s
-      return unless updates.keys.any? { |column| tenancy_column_name(column) == fk }
+      return unless updates.keys.any? { |column| tenancy_fk_column?(column, fk) }
 
       raise TenancyDable::TenantImmutableError,
         "#{klass.name}##{fk} is immutable; a record's tenant cannot change after create"
     end
 
     # The one pin classifier both guards consume (§16.1), so what they reason
-    # about cannot drift. `active_tenant` is non-nil. A pin to the current tenant
-    # wins over a recorded removal (`rewhere(tenant_id: current)` reads only the
-    # current tenant); a nil pin is :unpinned (the default scope still ANDs in).
+    # about cannot drift. `active_tenant` is non-nil. It reads the fk's LITERAL
+    # pins from the where clause, never `where_values_hash` (which raises on
+    # `lower(name) = ?` and reports nil for a non-literal equality), in order:
+    #   * a literal pin to another tenant, or a list holding one, is :other;
+    #   * a literal pin to the current tenant is :current: the conjunct confines
+    #     the rows (`rewhere(tenant_id: current)`, an eager_load join that ANDs
+    #     `tenant_id = tenants.id` beside it);
+    #   * the built-without-tenant marker and `unscope` are :removed;
+    #   * any other top-level predicate that mentions the fk (`!=`, `NOT`, a
+    #     range, a subquery, an `or` Grouping) replaced the default scope's
+    #     equality and is :removed; an explicit nil pin (`IS NULL`) is the one
+    #     shape that stays :unpinned.
     def tenancy_pin_state(active_tenant)
       fk = TenancyDable.configuration.tenant_fk.to_s
-      values = where_values_hash
-      pinned = values[fk]
-      return :current if !pinned.nil? && pinned.to_s == active_tenant.id.to_s
-      return :other unless pinned.nil?
-      return :removed if is_a?(TenancyDable::BuiltWithoutTenant)
+      pins = tenancy_fk_literal_pins(fk)
+      return :other if pins.any? { |pin| tenancy_other_pin?(pin, active_tenant) }
+      return :current if pins.any? { |pin| tenancy_current_pin?(pin, active_tenant) }
+      # extending_values survives `dup`, which drops the singleton extension
+      return :removed if is_a?(TenancyDable::BuiltWithoutTenant) || extending_values.include?(TenancyDable::BuiltWithoutTenant)
       return :removed if tenancy_fk_unscoped?(fk)
 
-      # No equality on the fk at all: any top-level predicate that mentions it
-      # (`!=`, `NOT`, a range, a subquery, an `or` Grouping) replaced the default
-      # scope's equality. An explicit nil pin (`IS NULL`, an Equality) is the one
-      # shape that stays :unpinned; `where_values_hash` also reports nil for a
-      # subquery on the fk, which is not an Equality.
-      tenancy_fk_in_where?(fk, nil_pin: values.key?(fk)) ? :removed : :unpinned
+      tenancy_fk_in_where?(fk) ? :removed : :unpinned
+    end
+
+    # The literal values of the top-level fk equalities: a value, or a list of
+    # values. A right side that is not a bound value (a subquery, a column, an
+    # `Arel.sql` literal) is not a pin.
+    def tenancy_fk_literal_pins(fk)
+      tenancy_equality_nodes(where_clause.ast).filter_map do |node|
+        next unless tenancy_fk_attribute?(node.left, fk)
+
+        value = tenancy_node_value(node.right)
+        [value] unless value.equal?(NOT_LITERAL)
+      end.map(&:first)
+    end
+
+    def tenancy_equality_nodes(node)
+      return [] if node.nil? || node.is_a?(String)
+      return node.children.flat_map { |child| tenancy_equality_nodes(child) } if node.is_a?(Arel::Nodes::And)
+
+      (node.respond_to?(:equality?) && node.equality?) ? [node] : []
+    end
+
+    def tenancy_node_value(node)
+      if node.respond_to?(:value_before_type_cast)
+        node.value_before_type_cast
+      elsif node.is_a?(Array)
+        values = node.map { |value| tenancy_node_value(value) }
+        (values.any? { |value| value.equal?(NOT_LITERAL) }) ? NOT_LITERAL : values
+      else
+        NOT_LITERAL
+      end
+    end
+
+    def tenancy_fk_attribute?(node, fk)
+      node.is_a?(Arel::Attributes::Attribute) && node.name.to_s == fk &&
+        node.relation.respond_to?(:name) && node.relation.name.to_s == klass.table_name
+    end
+
+    # A list is :current when it reads nothing or only the current tenant (`[]`,
+    # `[current, current]`, `[current, nil]`); any other list names another tenant.
+    def tenancy_current_pin?(pin, active_tenant)
+      return pin.all? { |value| value.nil? || value.to_s == active_tenant.id.to_s } if pin.is_a?(Array)
+
+      !pin.nil? && pin.to_s == active_tenant.id.to_s
+    end
+
+    def tenancy_other_pin?(pin, active_tenant)
+      return !tenancy_current_pin?(pin, active_tenant) if pin.is_a?(Array)
+
+      !pin.nil? && pin.to_s != active_tenant.id.to_s
+    end
+
+    def tenancy_other_pin(fk, active_tenant)
+      tenancy_fk_literal_pins(fk).find { |pin| tenancy_other_pin?(pin, active_tenant) }
     end
 
     def tenancy_fk_unscoped?(fk)
@@ -182,18 +243,28 @@ module TenancyDable
       end
     end
 
+    # An alias (`alias_attribute :workspace_id, :tenant_id`) resolves to its
+    # column, and column names compare case-insensitively (SQLite and MySQL do).
+    def tenancy_fk_column?(column, fk)
+      name = tenancy_column_name(column)
+      klass.attribute_aliases.fetch(name, name).casecmp?(fk)
+    end
+
     # A Symbol/String compares its last "."-separated segment ("widgets.tenant_id"
     # counts); an Arel attribute compares #name, which is how `rewhere` records.
     def tenancy_column_name(column)
       column.is_a?(Arel::Attributes::Attribute) ? column.name.to_s : column.to_s.split(".").last
     end
 
-    # Reads `where_clause`, never `arel` (the `arel` hook runs this guard).
-    def tenancy_fk_in_where?(fk, nil_pin:)
+    # Any top-level predicate on the fk other than an explicit literal nil pin
+    # (`IS NULL`). Reads `where_clause`, never `arel` (the `arel` hook runs this
+    # guard).
+    def tenancy_fk_in_where?(fk)
       ast = where_clause.ast
       top = ast.is_a?(Arel::Nodes::And) ? ast.children : [ast]
       top.any? do |node|
-        !(nil_pin && node.is_a?(Arel::Nodes::Equality)) && tenancy_references_fk?(node, fk)
+        nil_pin = node.is_a?(Arel::Nodes::Equality) && tenancy_fk_attribute?(node.left, fk) && tenancy_node_value(node.right).nil?
+        !nil_pin && tenancy_references_fk?(node, fk)
       end
     end
 

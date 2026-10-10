@@ -387,4 +387,93 @@ RSpec.describe "TenancyDable::RelationExtension — read guard" do
       end
     end
   end
+
+  describe "the classifier reads literal pins from the where clause" do
+    let(:arel) { Widget.arel_table }
+
+    def reads(&block) = TenancyDable.with_tenant(tenant_b, &block)
+
+    before { create(:widget, tenant: tenant_b, name: "B-1") }
+
+    it "reads a scoped model with a case-insensitive uniqueness validation inside its tenant" do
+      model = Class.new(ApplicationRecord) do
+        self.table_name = "gadgets"
+        include TenancyDable::Scoped
+
+        belongs_to_tenant
+        validates :name, uniqueness: {scope: :tenant_id, case_sensitive: false}
+
+        def self.name = "CiGadget"
+      end
+      stub_const("CiGadget", model)
+
+      reads do
+        expect(CiGadget.create(name: "Alpha")).to be_persisted
+        expect(CiGadget.new(name: "ALPHA")).not_to be_valid
+      end
+    end
+
+    it "validates_uniqueness_to_tenant with case_sensitive: false saves inside its tenant" do
+      model = Class.new(ApplicationRecord) do
+        self.table_name = "gadgets"
+        include TenancyDable::Scoped
+
+        belongs_to_tenant
+        validates_uniqueness_to_tenant :name, case_sensitive: false
+
+        def self.name = "CiToTenantGadget"
+      end
+      stub_const("CiToTenantGadget", model)
+
+      reads { expect(CiToTenantGadget.create(name: "Beta")).to be_persisted }
+    end
+
+    it "reads where(arel_table[:name].lower.eq(...)) inside a tenant" do
+      reads do
+        Gadget.create!(name: "Gamma")
+        expect(Gadget.where(Gadget.arel_table[:name].lower.eq("gamma")).count).to eq(1)
+      end
+    end
+
+    it "refuses an Arel equality on the fk against a subquery, through merge and unscoped" do
+      subquery = Tenant.where(id: tenant_a.id).select(:id).arel
+
+      refused { Widget.all.merge(Widget.unscoped.where(arel[:tenant_id].eq(subquery))).to_a }
+      refused { Widget.unscoped.where(arel[:tenant_id].eq(subquery)).to_a }
+    end
+
+    it "refuses an Arel equality on the fk against a column or an Arel.sql literal" do
+      refused { Widget.all.merge(Widget.unscoped.where(arel[:tenant_id].eq(arel[:tenant_id]))).to_a }
+      refused { Widget.all.merge(Widget.unscoped.where(arel[:tenant_id].eq(Arel.sql(tenant_a.id.to_s)))).to_a }
+    end
+
+    it "still reads Tenant.where(id: b).eager_load(:widgets)" do
+      reads do
+        tenants = Tenant.where(id: tenant_b.id).eager_load(:widgets).to_a
+        expect(tenants.flat_map { |tenant| tenant.widgets.map(&:name) }).to eq(["B-1"])
+      end
+    end
+
+    it "reads a where(tenant: <subquery of the current tenant>) ANDed with the default scope" do
+      reads { expect(Widget.where(tenant: Tenant.where(id: tenant_b.id)).map(&:name)).to eq(["B-1"]) }
+    end
+
+    it "reads where(tenant_id: [b, b]) and where(tenant_id: [])" do
+      reads do
+        expect(Widget.where(tenant_id: [tenant_b.id, tenant_b.id]).count).to eq(1)
+        expect(Widget.where(tenant_id: []).count).to eq(0)
+      end
+    end
+
+    it "names the other tenant of a list pin in the message" do
+      expect { reads { Widget.unscoped.where(tenant_id: [tenant_b.id, tenant_a.id]).to_a } }
+        .to raise_error(TenancyDable::CrossTenantReadError, /pinned to tenant \[#{tenant_b.id}, #{tenant_a.id}\]/)
+    end
+
+    it "refuses stale.dup, which drops the singleton marker" do
+      stale = TenancyDable::Current.set(tenant: nil) { Widget.where.not(name: nil) }
+
+      refused { stale.dup.to_a }
+    end
+  end
 end

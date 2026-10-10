@@ -61,7 +61,8 @@ module TenancyDable
   class UnsafeIsolationError < Error; end
 
   # `without_tenant` was called without a reason while
-  # `config.require_bypass_reason` is on (v0.5.0, §16.5).
+  # `config.require_bypass_reason` is on, or with a `reason:` that is not nil, a
+  # String or a Symbol (v0.5.0, §16.5).
   class BypassReasonError < Error; end
 
   # Invalid configuration — empty `roles`, `manager_roles` not a subset of
