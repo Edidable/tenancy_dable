@@ -980,8 +980,11 @@ pins = the LITERAL pins of fk: the values of the top-level conjuncts of
            #   neither nil nor the current id (a multi-tenant read, even when it
            #   contains the current id)
 :current   if a literal pin is the current id, or a list whose non-nil values are
-           #   all the current id ([current, current], [current, nil]) or that is
-           #   empty ([] reads nothing): the conjunct confines the rows
+           #   all the current id ([current, current]) or that is empty ([] reads
+           #   nothing): the conjunct confines the rows. The Hash spelling
+           #   `where(tenant_id: [current, nil])` never reaches this rule: Rails
+           #   builds it as `tenant_id = current OR tenant_id IS NULL`, a Grouping
+           #   on the fk, so it is :removed (refused, the safe side)
 :removed   if the relation is_a?(TenancyDable::BuiltWithoutTenant) or its
            #   extending_values include the module (built with no current tenant,
            #   or inside without_tenant; see the marker below; extending_values
