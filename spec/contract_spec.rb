@@ -85,6 +85,16 @@ RSpec.describe "Frozen public contract (PLAN.md)" do
       expect(TenancyDable::WITHOUT_TENANT_EVENT).to eq("without_tenant.tenancy_dable")
     end
 
+    it "refuses a without_tenant reason that is not nil, a String or a Symbol (§16.5)" do
+      [1, 1.5, true, {a: 1}, [:a], Object.new].each do |reason|
+        expect { TenancyDable.without_tenant(reason: reason) { raise "must not run" } }
+          .to raise_error(TenancyDable::BypassReasonError)
+      end
+      expect(TenancyDable.without_tenant(reason: "a String") { :ran }).to eq(:ran)
+      expect(TenancyDable.without_tenant(reason: :a_symbol) { :ran }).to eq(:ran)
+      expect(TenancyDable.without_tenant { :ran }).to eq(:ran)
+    end
+
     it "pundit_context takes keywords (user:, tenant:, membership:)" do
       required = TenancyDable.method(:pundit_context).parameters
         .select { |param| param.first == :keyreq }.map(&:last)
@@ -120,6 +130,12 @@ RSpec.describe "Frozen public contract (PLAN.md)" do
       params = TenancyDable::Scoped::ClassMethods.instance_method(:validates_uniqueness_to_tenant).parameters
       expect(params.map(&:first)).to include(:rest, :keyrest)
     end
+
+    %i[touch update_columns delete].each do |method_name|
+      it "owns ##{method_name}, the callback-free write it refuses on a foreign record (§16.2)" do
+        expect(Widget.instance_method(method_name).owner).to eq(TenancyDable::Scoped)
+      end
+    end
   end
 
   describe "RelationExtension guards (§5.2, §16.1)" do
@@ -146,6 +162,18 @@ RSpec.describe "Frozen public contract (PLAN.md)" do
         expect(TenancyDable::RelationExtension.private_instance_methods).to include(method_name)
         expect(TenancyDable::RelationExtension.instance_methods).not_to include(method_name)
       end
+    end
+  end
+
+  describe "InsertAllExtension (§16.2)" do
+    it "is prepended to ActiveRecord::InsertAll" do
+      expect(ActiveRecord::InsertAll.ancestors).to include(TenancyDable::InsertAllExtension)
+      expect(ActiveRecord::InsertAll.ancestors.index(TenancyDable::InsertAllExtension))
+        .to be < ActiveRecord::InsertAll.ancestors.index(ActiveRecord::InsertAll)
+    end
+
+    it "keeps its guard private" do
+      expect(TenancyDable::InsertAllExtension.private_instance_methods).to include(:tenancy_guard_insert_all!)
     end
   end
 
@@ -284,6 +312,26 @@ RSpec.describe "Frozen public contract (PLAN.md)" do
       )
       expect(I18n.t("errors.messages.cross_tenant", locale: :en)).to eq(TenancyDable::CrossTenantError::MESSAGE)
       expect(I18n.t("errors.messages.cross_tenant", locale: :"pt-BR")).to eq("pertence a outro tenant")
+    end
+  end
+
+  describe "Railtie.locale_files (§16.6)" do
+    it "returns only en.yml for an English-only i18n config" do
+      config = ActiveSupport::OrderedOptions.new
+      config.default_locale = :en
+      config.available_locales = [:en, :fr]
+      expect(TenancyDable::Railtie.locale_files(config).map { |f| File.basename(f) }).to eq(["en.yml"])
+      expect(TenancyDable::Railtie.locale_files(ActiveSupport::OrderedOptions.new).map { |f| File.basename(f) }).to eq(["en.yml"])
+    end
+
+    it "adds pt-BR.yml when pt-BR is declared as the default or an available locale" do
+      as_default = ActiveSupport::OrderedOptions.new
+      as_default.default_locale = :"pt-BR"
+      as_available = ActiveSupport::OrderedOptions.new
+      as_available.available_locales = ["en", "pt-BR"]
+      [as_default, as_available].each do |config|
+        expect(TenancyDable::Railtie.locale_files(config).map { |f| File.basename(f) }).to eq(%w[en.yml pt-BR.yml])
+      end
     end
   end
 

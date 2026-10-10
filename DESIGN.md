@@ -33,7 +33,7 @@ that implements it. **Names here match `PLAN.md` exactly.**
 | `TenancyDable::VERSION` | `lib/tenancy_dable/version.rb` | exists (`"0.0.1"` → `0.1.0` in 15; → `0.2.0` in nits phase 04, §13) |
 | `TenancyDable::Configuration` | `lib/tenancy_dable/configuration.rb` | 02 (stub exists) |
 | `TenancyDable::Current` | `lib/tenancy_dable/current.rb` | 02 |
-| `TenancyDable::Error` + 8 subclasses | `lib/tenancy_dable/errors.rb` | 02 (`Error` base exists in entry) |
+| `TenancyDable::Error` + 12 subclasses | `lib/tenancy_dable/errors.rb` | 02 (`Error` base exists in entry) |
 | `TenancyDable::Railtie` | `lib/tenancy_dable/railtie.rb` | 02 |
 | `TenancyDable::Scoped` | `lib/tenancy_dable/scoped.rb` | 03 |
 | `TenancyDable::RelationExtension` | `lib/tenancy_dable/relation_extension.rb` | 03 |
@@ -73,7 +73,7 @@ them on the `lib/generators` path only when a generator command runs.
             ┌─────────────────────┼──────────────────────┐
             ▼                     ▼                      ▼
    version.rb            configuration.rb            errors.rb
-   (VERSION)            (Configuration)        (Error + 8 subclasses)
+   (VERSION)            (Configuration)        (Error + 12 subclasses)
                                   │
                                   ▼
                              current.rb
@@ -841,6 +841,8 @@ it (a job can ask "what role is the acting member?" the same way a controller ca
 - **Deleted tenant / membership:** a since-deleted record reloads to `nil`, so the
   job performs under `with_tenant(nil)` (fail-open by default, fail-closed under
   `require_tenant`). Membership now follows the same rule, symmetrically.
+  *Amended in v0.5.0 (§16.2): a TENANT id that no longer resolves now raises
+  `TenantNotFoundError` instead; a deleted membership still reloads to `nil`.*
 
 `SERIALIZED_MEMBERSHIP_KEY` and the `current_membership` restore are additive; the
 `Job` concern's existing surface (`SERIALIZED_TENANT_KEY`,
@@ -887,12 +889,13 @@ unchanged.
 > Frozen for the v0.5.0 run, which answers a production consumer's proposals. The
 > v0.1.0 surface (§1-§12) and the deltas §13-§15 stay frozen **except** as amended
 > here. This section amends §3 (facade), §4.1 (settings), §4.2 (isolation check),
-> §5.1 (declaration step, create refusal), §5.2 (read guard), §7 (errors), §8
-> (fixture schema) and §11 (invariants 2, 6, new 7). One release carries every
-> item.
+> §5.1 (declaration step, foreign-tenant write refusal), §5.2 (read guard), §7
+> (errors), §8 (fixture schema), §11 (invariants 2, 6, new 7) and §14.2 (a job
+> whose tenant vanished). One release carries every item.
 >
 > Three changes are **on by default and can raise in a host that works today**:
-> the read guard (`config.guard_reads = true`), the create refusal, and the
+> the read guard (`config.guard_reads = true`), the refusal to write into another
+> tenant (§16.2), and the
 > isolation check (`config.isolation_check = :raise`). Each one refuses a
 > cross-tenant leak that 0.4.0 lets through, and each has an explicit escape: a
 > setting (`guard_reads = false`, `isolation_check = :warn`/`:off`), or a local
@@ -930,7 +933,7 @@ loads the target and destroys each record; it never calls
 closes it: loading the target is refused, nothing is deleted.
 
 **Hooks.** `RelationExtension` (prepended to `ActiveRecord::Relation`, §5.2) gains
-six overrides, each `tenancy_guard_read!` then `super`, each with `(...)`
+eight overrides, each `tenancy_guard_read!` then `super`, each with `(...)`
 forwarding like the bulk-write overrides:
 
 | Hook | Visibility (all lines) | Why it is needed |
@@ -941,9 +944,14 @@ forwarding like the bulk-write overrides:
 | `exists?(...)` | public | `exists?`, `any?`/`empty?`/`none?` on an unloaded relation (calls `select_rows` directly) |
 | `ids(...)` | public | `Relation#ids`/`async_ids`: builds its own select and calls `select_all`, skipping the three above |
 | `load_async(...)` | public | with an async executor, schedules `exec_main_query` and skips `exec_queries`; hooking it refuses the query **before** it runs (without an executor it calls `load`, and the guard simply runs twice) |
+| `compute_cache_version(...)` | public (Rails' own visibility on 7.1, 7.2 and 8.1) | `cache_version` / `cache_key_with_version` on an unloaded relation send their own `COUNT`/`MAX` query, so they read another tenant's rows (and a fragment cache then serves them) without touching `exec_queries` |
+| `arel(...)` | public `:nodoc:`, `arel(aliases = nil)` on 7.1, 7.2 and 8.1 (forwarded with `(...)`) | a scoped relation compiled into a subquery, a `from` or a `with` of a model that is NOT tenant-scoped (`Gadget.where(id: Widget.unscope(where: :tenant_id).select(:id))`) never loads, so none of the hooks above sees it; every such embedding is compiled through `arel` |
 
 The private hooks are defined under `private` in the module so the prepend keeps
-them private. A scoped model's `find`/`find_by` never takes the statement-cache
+them private. **Side effect (accepted, documented):** because `arel` is hooked,
+`to_sql` and `arel` on a relation the guard refuses raise `CrossTenantReadError`
+too, not only the loads. The classifier reads `where_clause` and
+`unscope_values`, never `arel`, so the hook cannot recurse. A scoped model's `find`/`find_by` never takes the statement-cache
 path (its default scope makes `scope_attributes?` true), and an association reader
 skips the association statement cache for the same reason, so both reach
 `exec_queries` (measured).
@@ -963,21 +971,46 @@ pinned = where_values_hash[fk]   # top-level equality / IN predicates on klass.t
 :current   if !pinned.nil? && pinned.to_s == active_tenant.id.to_s
 :other     if !pinned.nil?       # another id, or an Array (an IN list is a multi-tenant
                                  # read, even when it contains the current id)
-:removed   if unscope_values contains :where, or a {where: cols} where any col names fk
-           #   (a Symbol/String compares its last "."-separated segment, so
-           #    "widgets.tenant_id" counts; an Arel attribute compares #name, which is
-           #    how rewhere records its removals)
-:removed   if a top-level Arel::Nodes::Grouping predicate references klass.table_name's fk
-           #   (how `or` folds the tenant predicate into a disjunction). Top-level
-           #    predicates are where_clause.ast.children when the ast is an
-           #    Arel::Nodes::And, else [where_clause.ast]. The walk is duck-typed so it
-           #    covers 7.1 (Or < Binary: left/right) and 7.2+ (Or < Nary: children):
-           #    an Arel::Attributes::Attribute matches when name == fk and
-           #    relation.name == klass.table_name; an Arel::Nodes::HomogeneousIn
-           #    recurses into #attribute; an Array into its elements; any other node
-           #    into #children, #left/#right and #expr where it responds to them.
+:removed   if the relation is_a?(TenancyDable::BuiltWithoutTenant)
+           #   (built with no current tenant, or inside without_tenant; see the marker
+           #    below). Checked AFTER the two pin tests, so a marked relation pinned to
+           #    the current tenant is :current
+:removed   if unscope_values contains :where, or a {where: targets} where any target
+           #   names fk. A target is a Symbol/String/Arel attribute, a list of them, or
+           #   a table-keyed Hash ({widgets: :tenant_id}, {"widgets" => ["tenant_id"]},
+           #   also inside a list), flattened to its column names first. A Symbol/String
+           #   compares its last "."-separated segment, so "widgets.tenant_id" counts; an
+           #   Arel attribute compares #name, which is how rewhere records its removals
+:removed   if where_values_hash has NO key for fk and ANY top-level predicate of the
+           #   where clause references klass.table_name's fk (`!=`, NOT, a range, a
+           #   subquery, an `or` Grouping: whatever replaced the default scope's equality).
+           #   The one exception is an explicit nil pin: when the key IS present,
+           #   a top-level Arel::Nodes::Equality (`IS NULL`) is not counted, so
+           #   `where(tenant_id: nil)` stays :unpinned. The key alone cannot tell the two
+           #   apart, because where_values_hash also reports nil for an `In` subquery on
+           #   the fk, so any other top-level node mentioning the fk is :removed even
+           #   when the key is present.
+           #   Top-level predicates are where_clause.ast.children when the ast is an
+           #   Arel::Nodes::And, else [where_clause.ast]. The walk is duck-typed so it
+           #   covers 7.1 (Or < Binary: left/right) and 7.2+ (Or < Nary: children):
+           #   an Arel::Attributes::Attribute matches when name == fk and
+           #   relation.name == klass.table_name; an Arel::Nodes::HomogeneousIn
+           #   recurses into #attribute; an Array into its elements; any other node
+           #   into #children, #left/#right and #expr where it responds to them.
 :unpinned  otherwise
 ```
+
+**The `BuiltWithoutTenant` marker.** `module TenancyDable::BuiltWithoutTenant` is an
+empty module (no methods; the classifier reads it). The default scope block
+(`Scoped`, §5.1) returns `extending(TenancyDable::BuiltWithoutTenant)` instead of
+`nil` on its two unfiltered branches: inside `without_tenant`, and with no current
+tenant under the fail-open default (`require_tenant` off). A relation built that way
+and loaded later inside a tenant (`rel = Widget.all` before `with_tenant`, then
+`rel.to_a` inside it) would otherwise be indistinguishable from `Model.unscoped` and
+read every tenant; the marker makes the classifier answer `:removed`. `merge`
+carries the marker; merging a marked relation into one built in a tenant yields a
+pin to the current tenant, so it is `:current` and passes (it reads only the current
+tenant). `Model.unscoped` is NOT marked (residual below).
 
 The order is deliberate: a pin to the current tenant wins over a recorded removal,
 so `rewhere(tenant_id: current.id)` and `unscope(where: :tenant_id).where(tenant_id:
@@ -1003,6 +1036,13 @@ raise `BulkWriteError` when there is no current tenant (as today), else raise
 the 0.4.0 rule ("not equality-pinned to the current tenant's id"), with today's two
 messages. `config.guard_reads` does not affect it.
 
+**`update_all` refuses a tenant FK rewrite (invariant 3).** After the bulk guard,
+`update_all(updates)` raises `TenantImmutableError` when `updates` is a Hash whose
+keys include the tenant FK (String or Symbol; a key compares its last
+"."-separated segment), whatever value it carries, except inside `without_tenant`.
+It runs for a tenant-scoped model only. The SQL-string and Array forms name no
+column the gem can see and stay a residual.
+
 **What passes, on purpose (measured):** `b.widgets` and its `ids`, a preload of the
 current tenant's owners (`Tenant.where(id: b.id).includes(:widgets)`: a one-element
 key list becomes an equality), `Widget.count`, `widget.reload`, `unscope(where:
@@ -1021,21 +1061,35 @@ last one is the explicit Active Record bypass and must keep passing: Rails' own
 a preload of another or of several tenants' owners (`Tenant.where(id: [a, b])
 .includes(:widgets)`), `Widget.unscoped.where(tenant_id: other)`, destroying
 another tenant whose `dependent:` associations must be loaded, and an `or` that
-mixes the tenant predicate into a disjunction. Code that pins another tenant is a
+mixes the tenant predicate into a disjunction. Also refused, since the classifier
+counts any FK predicate that is not an equality pin: `invert_where` (on a host scope
+or on `Widget`), `Widget.unscoped.where.not(tenant_id: x)`, a range on the FK merged
+in, and `Widget.unscoped.where(tenant_id: <subquery>)`; a relation built before the
+tenant was entered (marker above); a table-keyed `unscope(where: {widgets:
+:tenant_id})`; the cache key / version of an unloaded relation; a scoped relation
+embedded in a subquery, `from` or CTE of any model; and `to_sql` / `arel` of a
+refused relation. Code that pins another tenant is a
 bug whether it gets nothing or something back; the fix is
 `with_tenant(other) { ... }`, or a deliberate `without_tenant { ... }`.
 
-**Residuals (documented limits, like the bulk-write guard's).** A relation whose
-where clause no longer mentions the tenant FK and that recorded no removal is
-indistinguishable from `Model.unscoped`, and passes: `Model.unscoped` itself (and
-`unscoped.where.not(tenant_id: x)`), `Model.unscoped { }`, `except(:where)`,
+**Residuals (documented limits, like the bulk-write guard's).** *Closed in 0.5.0
+after the verification round:* `unscoped.where.not(tenant_id: x)` and any other
+non-equality or subquery predicate on the FK, `invert_where`, a stale relation
+built before the tenant was entered, a table-keyed unscope, the cache key of an
+unloaded relation, and a scoped relation embedded as a subquery. *What remains:* a
+relation whose where clause no longer mentions the tenant FK at all and that
+recorded no removal is indistinguishable from `Model.unscoped`, and passes:
+`Model.unscoped` with no FK predicate (and `Model.unscoped { }`), `except(:where)`,
 `only(...)` without `:where`, and an `or` with such a relation
 (`Widget.all.or(Widget.unscope(where: :tenant_id))`, whose disjunction Active
 Record collapses to "no predicate"). So do SQL-string predicates
-(`where("tenant_id = ?", x)`) and raw SQL (`find_by_sql`, `connection.select_all`).
-All of these are explicit relation surgery; the guard targets the shapes Active
-Record produces on its own (association merge, `rewhere`, `merge`, `unscope`,
-`or`).
+(`where("tenant_id = ?", x)`, and a SQL-string `update_all`), raw SQL
+(`find_by_sql`, `connection.select_all`), `reload` by id (it runs inside
+`unscoped { }` and is a read of the row the record already is), and the cache key
+of an already-loaded association target (no query runs; it reads the records
+already in memory). All of these are explicit relation surgery; the guard targets
+the shapes Active Record produces on its own (association merge, `rewhere`,
+`merge`, `unscope`, `or`).
 
 **Error.** `TenancyDable::CrossTenantReadError < TenancyDable::Error`, sibling of
 `BulkWriteError`. Message: `"refusing to read #{klass.name} "` followed by
@@ -1057,7 +1111,13 @@ leak), so a qualified name compares its last segment. (3) The proposal's rule le
 leak); the disjunction rule closes it. (4) The `destroy_all` write leak above was
 not in the proposal.
 
-### 16.2 Creating into another tenant is refused (§5.1, invariant 2)
+### 16.2 Writing into another tenant is refused (§5.1, invariant 2)
+
+This subsection began as the create refusal and, after the verification round,
+covers every write that would land in, or change, another tenant's row: create,
+update, destroy, `touch`, `update_columns`, `delete`, `insert_all` / `upsert_all`,
+and a job whose tenant vanished. The create rule is stated first, then the
+generalisation.
 
 On 0.4.0, inside `with_tenant(b)`, `a.widgets.create!(...)`,
 `Widget.create!(tenant: a)`, `Widget.create!(tenant_id: a.id)` and
@@ -1079,25 +1139,93 @@ return IF record[fk].to_s == current_tenant.id.to_s
 raise CrossTenantWriteError
 ```
 
-**Mechanism.** `belongs_to_tenant` installs the rule twice, as two prepended
-callbacks that share one private instance method defined in `Scoped`,
-`tenancy_refuse_foreign_tenant!(fk)`, each called with the FK bound at declaration
-(like every other step of §5.1):
+**Generalised rule (FROZEN, supersedes the create-only form above).** The same
+refusal applies to a record that already exists. `tenancy_refuse_foreign_tenant!(fk,
+action)` runs, with `action` one of `:create :update :destroy :touch :delete`:
 
-- `before_validation(on: :create, prepend: true)`: runs before every validator,
-  whatever validators the model has, so `validates_uniqueness_to_tenant` (or any
-  validator that reads) never runs first and the error is always
-  `CrossTenantWriteError`, never `CrossTenantReadError` (measured with the
-  prototype: both `Widget`, which has the uniqueness validation, and a model
-  without one raise the write error);
-- `before_create(prepend: true)`: covers `save(validate: false)`, which skips the
-  validation callbacks, and checks the FK as it is finally written (after
-  `before_save` callbacks such as a `belongs_to` autosave have run).
+```
+return IF Current.tenant_scope_disabled          # without_tenant
+return IF TenancyDable.current_tenant.nil?       # no current tenant: unchanged
+tenant_id = persisted? ? attribute_in_database(fk) : self[fk]
+                                                 # a persisted record is judged by the tenant its
+                                                 # row holds, not by an unsaved assignment
+return IF tenant_id.blank?                       # new record, blank FK: auto-assign decides
+return IF tenant_id.to_s == current_tenant.id.to_s
+raise CrossTenantWriteError
+```
 
-Both run in the validated path; the check is one comparison. `config.guard_reads`
-does not affect it. There is no setting for it: like immutability (invariant 3) it
-is a rule, and the local escape is explicit (`with_tenant(target) { create }`, or
-`without_tenant { create }`).
+**Mechanism.** `belongs_to_tenant` installs the rule as three prepended callbacks
+(each calls the private helper with the FK bound at declaration, like every other
+step of §5.1) and `Scoped` overrides three callback-free writes:
+
+- `before_validation(prepend: true)` (create AND update): runs before every
+  validator, whatever validators the model has, so `validates_uniqueness_to_tenant`
+  (or any validator that reads) never runs first and the error is always
+  `CrossTenantWriteError`, never `CrossTenantReadError`. It also makes `valid?`
+  on a persisted record of another tenant raise, which is intended (fail fast);
+- `before_save(prepend: true)` (replaces the 0.5.0-prototype `before_create`):
+  covers `save(validate: false)`, which skips the validation callbacks, for both
+  create and update;
+- `before_destroy(prepend: true)`: `destroy` / `destroy!` of another tenant's
+  record, before its `dependent:` associations load;
+- instance overrides in `Scoped`, for the writes that skip callbacks, each
+  checking first when the record is persisted: `touch(*, **)` (`:touch`),
+  `update_columns(attributes)` (`:update`; `update_column` calls it) and `delete`
+  (`:delete`).
+
+The check is one comparison. `config.guard_reads` does not affect it. There is no
+setting for it: like immutability (invariant 3) it is a rule, and the local escape
+is explicit (`with_tenant(target) { create }`, or `without_tenant { create }`).
+
+**`update_columns` cannot rewrite the tenant (invariant 3).** On a persisted
+record, `update_columns` / `update_column` with the FK among the keys and a value
+different from `read_attribute(fk)` raise `TenantImmutableError`, always (no
+current tenant, and inside `without_tenant`, included), like the `tenant_id=`
+writer. The same value passes. The Hash form of `update_all` has the same refusal
+(§16.1).
+
+**`InsertAllExtension` (`insert_all`, `insert`, `insert_all!`, `upsert_all`,
+`upsert`).** These skip every callback, so the rule above never runs, and
+`InsertAll` merges the RELATION's `scope_for_create` over every row (through
+another tenant's association that is THAT tenant). `lib/tenancy_dable/insert_all_extension.rb`
+defines `TenancyDable::InsertAllExtension`, prepended to `ActiveRecord::InsertAll`
+by the railtie inside `install_active_record!`, beside the `Relation` prepend. It
+hooks `initialize(...)`, the one point shared by 7.1 (`model, inserts, ...`) and
+7.2+ (`relation, connection, inserts, ...`): arguments are forwarded untouched and
+the RESOLVED state (`inserts`, `@scope_attributes`, `on_duplicate`, `unique_by`) is
+read after `super`. For a tenant-scoped model with a current tenant and the bypass
+off (no tenant and `without_tenant` pass through; so does a non-scoped model), it
+raises `CrossTenantWriteError` on either rule:
+
+1. **FK rule.** Every row's effective FK (the scope attribute over the row's own
+   value) must equal the current tenant's id. A row with no tenant is refused too
+   ("into no tenant"), and a mixed batch writes nothing. Plain `insert_all`
+   (skip) and `insert_all!` (raise) need only this rule.
+2. **Upsert rule.** When `on_duplicate == :update`, the resolved `unique_by`
+   index columns must include the FK. A primary-key conflict can always reach
+   another tenant's row, as can an index that spans tenants, and the conflict
+   UPDATE then rewrites that row and its tenant column. On an adapter without
+   conflict targets (MySQL), `unique_by` resolves to nothing, so every upsert on a
+   scoped model inside a tenant is refused. A custom `on_duplicate` SQL string
+   cannot be inspected; it is covered only by this rule.
+
+Messages name ids only (invariant 6). The first-draft note that `insert_all`
+"cannot create into another tenant" and that `upsert_all` is "not guarded" is
+withdrawn: `Widget.insert_all` applies the default scope's attributes (so a row
+naming another tenant lands in the CURRENT tenant, measured), but through another
+tenant's association (`a.widgets.insert_all`) the relation's scope attributes name
+THAT tenant, and an upsert's conflict UPDATE can reach a row of any tenant. Both
+are now refused.
+
+**Vanished job tenant (amends §14.2).** `TenancyDable::Job#around_perform`
+(§14.2) re-loads the tenant by the serialized id. When the id is present but no
+longer resolves (destroyed, or hidden by a host default scope), it now raises
+`TenancyDable::TenantNotFoundError` ("<Job> was enqueued in tenant #ID, which no
+longer resolves; refusing to run it with no tenant") instead of running under
+`with_tenant(nil)`, which under the fail-open default would read and write every
+tenant. The §14.2 "Deleted tenant" bullet is replaced for the TENANT: a host can
+`discard_on TenancyDable::TenantNotFoundError`. A `nil` id (enqueued outside any
+tenant) performs untouched, as before; a deleted MEMBERSHIP still reloads to `nil`.
 
 **Raise, not a validation error (decided).** The tenant FK of a new record is not
 user input in a correctly built host (it comes from the current tenant or from
@@ -1106,22 +1234,21 @@ to a different tenant") would be meaningless to an end user. A raise also behave
 the same under `save(validate: false)`, where a validation error would be skipped,
 and matches the other write refusals (`BulkWriteError`, `TenantImmutableError`).
 The cross-tenant `belongs_to` check keeps adding a validation error (§5.1): its
-input (a parent id) plausibly does come from a form. `valid?` on such a new record
-raises too, which is intended (fail fast).
+input (a parent id) plausibly does come from a form. `valid?` on such a new record,
+or on a persisted record of another tenant, raises too, which is intended (fail
+fast).
 
 **Error.** `TenancyDable::CrossTenantWriteError < TenancyDable::Error`. Message:
 `"refusing to create #{self.class.name} in tenant ##{record[fk]} while acting in
 tenant ##{current.id}; enter the tenant with TenancyDable.with_tenant"`. Ids only.
-English, like every exception message; it adds nothing to `errors`, so it has no
-I18n key.
+For the other actions the verb and preposition change: `"refusing to
+update|destroy|touch|delete #{class} of tenant ##{record_tenant_id} while acting in
+tenant ##{current.id}; ..."`. English, like every exception message; it adds
+nothing to `errors`, so it has no I18n key.
 
 **Unchanged and out of scope.** `save(validate: false)` with a blank FK still
-skips the auto-assign (0.4.0). `insert_all` skips callbacks, but called on a scoped
-model inside a tenant it applies the default scope's attributes, so a row given
-another tenant's FK lands in the CURRENT tenant (measured on 7.1, 7.2 and 8.1): it
-cannot create into another tenant. `upsert_all` was not measured and is not
-guarded; with a unique index that spans tenants, its conflict update could touch
-another tenant's row (a residual, like raw SQL).
+skips the auto-assign (0.4.0). `increment!` and `update_counters` are not
+touched. Raw SQL stays a residual, like the read guard's.
 
 **Spec flip.** `spec/scoping/tenant_assignment_spec.rb:19` ("does not override an
 explicitly provided tenant_id") becomes "refuses an explicitly provided tenant_id
@@ -1243,14 +1370,19 @@ candidates =
 
 skip a model when (name = m.name.to_s):
   m.abstract_class?
-  m.base_class != m                                   # STI subclass: its base class answers for the table
+  m.base_class != m && m.table_name == m.base_class.table_name
+                                                      # REAL STI subclass: its base class answers for the
+                                                      # table. A subclass on its own table is its own model
   name == ns.to_s || name.start_with?("#{ns}::") for any ns in config.audit_ignored_namespaces
   config.audit_allowed.key?(name)
 
+scoped_tables = table_name of every model in (the audited set + every live named
+                AR descendant, no eager load) whose declaration is :scoped
+
 findings per remaining model (fk = config.tenant_fk.to_s, d = m.tenancy_declaration):
   :undeclared             d.nil?
-  :global_with_tenant_fk  d&.kind == :global && !d.allow_tenant_fk &&
-                          m.table_exists? && m.column_names.include?(fk)
+  :global_with_tenant_fk  d&.kind == :global && m.table_exists? && m.column_names.include?(fk) &&
+                          (scoped_tables.include?(m.table_name) || !d.allow_tenant_fk)
   :scoped_without_index   d&.kind == :scoped && m.table_exists? &&
                           Array(m.primary_key).first.to_s != fk &&
                           m.connection_pool.with_connection { |c| c.indexes(m.table_name) }
@@ -1262,11 +1394,26 @@ sorted by [name, KINDS.index(kind)], frozen
 Messages: `:undeclared` → `"declares no tenancy; add belongs_to_tenant, or
 tenant_global because: \"...\""`; `:global_with_tenant_fk` → `"is declared
 tenant_global but has a #{fk} column; scope it with belongs_to_tenant, or pass
-allow_tenant_fk: true if it is deliberately unscoped"`; `:scoped_without_index` →
+allow_tenant_fk: true if it is deliberately unscoped"`, or, when the table is also
+a scoped model's, `"is declared tenant_global but shares its table with a
+tenant-scoped model"`; `:scoped_without_index` →
 `"is tenant-scoped but no index leads with #{fk}"`. A composite index whose first
 column is the FK counts (the harness's `widgets[tenant_id, name]`), and so does a
 composite primary key that leads with it. A model whose table does not exist yet
-is still checked for `:undeclared` and skips the two schema checks. The audit
+is still checked for `:undeclared` and skips the two schema checks.
+
+**The scoped-table twin (L3).** A global model on the table of a scoped model reads
+and writes the very rows the scoped one protects, so `allow_tenant_fk: true` cannot
+excuse it: it is reported as `:global_with_tenant_fk` with the "shares its table"
+message. `scoped_tables` is built from the audited set UNIONED with every live
+named model (the same constant filter as the candidates, never an eager load), so
+auditing the global twin alone (`TenancyDable.audit([GlobalWidget])`) still finds a
+scoped sibling that is loaded. A scoped sibling that is not loaded is invisible
+until the app eager loads (the no-argument audit does).
+
+**Real STI only (L4).** An STI subclass is skipped because its base class answers
+for the table. A subclass that points at ANOTHER table (`self.table_name = ...`)
+shares nothing with its base, so it is audited as its own model. The audit
 reads only class metadata and the schema: no rows, nothing raised for a finding.
 `connection_pool.with_connection` is used because it exists on every supported
 line (`ActiveRecord::Base.with_connection` is 7.2+).
@@ -1312,8 +1459,16 @@ server, or anything on `async`), every fiber on a reactor thread shares it.
 Measured on 8.1.4 inside `Async`: with thread isolation, one fiber reads the tenant
 another fiber wrote (`["fb", "fb"]`); with `:fiber` isolation each keeps its own
 (`["fa", "fb"]`). Separately, work handed to another thread starts with no tenant
-(measured: `Thread.new { TenancyDable.current_tenant }.value` is `nil`), which is
-safe (fail-closed) but makes concurrency impossible without hand-made plumbing.
+(measured: `Thread.new { TenancyDable.current_tenant }.value` is `nil`). That is
+NOT fail-closed: the tenant is gone, so what the thread does next depends on
+`config.require_tenant`. With it OFF (the default) the default scope is the
+fail-open branch (§5.1), and the thread or fiber reads every tenant's rows (its
+relations carry the `BuiltWithoutTenant` marker, §16.1, but there is no current
+tenant for the read guard to compare against, so nothing refuses). Only
+`require_tenant = true` makes it raise `NoTenantError`. **Recommendation:** a host
+that runs threads, a thread pool or fibers sets `config.require_tenant = true` and
+hands the context across with `TenancyDable.carry` (below); this section's carrier
+exists because the lost context is otherwise a silent all-tenants read.
 
 **Isolation check (FROZEN).** A private facade method, `TenancyDable.check_isolation!`,
 runs FIRST in every gem write to `Current`, before anything is written:
@@ -1344,6 +1499,19 @@ fiber is blocking. `:warn` logs on every detected write (like `audit_overrides:
 `ConfigurationError` unless it is `:raise`, `:warn` or `:off`. A host that already
 runs fibers with thread isolation starts raising on the first tenant write, which
 is the bug the check reports; `:warn`/`:off` are the documented escape.
+
+**Scope of the check.** Puma, Sidekiq and rake do not run a fiber scheduler, so the
+check is a no-op there, unless host code opens an `Async { }` / `Sync { }` reactor
+inside them, which sets `Fiber.scheduler` for that thread (including a host that
+follows the advice below to `carry` work into async tasks).
+
+**Write only through the facade.** The check, the audit-override policy and the RLS
+statement live in the facade's writers (`current_tenant=`, `current_membership=`,
+`without_tenant`, `Snapshot#restore`). A write straight to
+`TenancyDable::Current` (`Current.set(tenant: ...)`, `Current.tenant = ...`,
+`Current.tenant_scope_disabled = ...`) skips all three: no isolation check, no
+audit-override handling, no RLS statement. It is a documented bypass, not a
+guarded path; hosts write tenant state through the facade only.
 
 **Context carrier (additive).**
 
@@ -1411,6 +1579,11 @@ def self.without_tenant(reason: nil)   #=> the block's value (signature change i
 
 **Order (FROZEN):**
 
+0. `reason` is not `nil`, a String or a Symbol → raise `BypassReasonError`
+   (`"without_tenant reason: must be a String or a Symbol, got #{reason.class}"`),
+   whatever `require_bypass_reason` says, before the isolation check, the event or
+   any state change. The payload therefore never holds a record (an
+   `ActiveRecord::Base`, a Hash, an exception) through `reason:`;
 1. `config.require_bypass_reason` is true and the reason is blank
    (`reason.nil? || reason.to_s.strip.empty?`) → raise `BypassReasonError`: no
    event, no state change;
@@ -1423,8 +1596,9 @@ def self.without_tenant(reason: nil)   #=> the block's value (signature change i
    (the §3 guarantee, unchanged).
 
 **Payload.** Exactly three keys. `reason`: the value passed, unchanged (`nil` when
-omitted). `tenant_id`: the raw tenant active when the bypass starts (the bypass
-does not change it), or `nil`. `call_site`: `"#{path}:#{lineno}"` of the first
+omitted; a String or Symbol). `tenant_id`: the raw tenant active when the bypass starts (the bypass
+does not change it), or `nil`. `call_site`: `"#{path}:#{lineno}"` where `path` is the
+entry's `absolute_path || path` (so an absolute path when Ruby knows it), taken from the first
 `caller_locations` entry whose `absolute_path || path` does not start with the
 gem's `lib/` directory (`"#{File.expand_path(__dir__)}/"` as seen from
 `lib/tenancy_dable.rb`), or `nil` when there is none.
@@ -1442,7 +1616,8 @@ normal exit and on raise.
 
 **Error and setting.** `TenancyDable::BypassReasonError < TenancyDable::Error`,
 message `"without_tenant requires a non-blank reason: (config.require_bypass_reason
-is on)"`. `config.require_bypass_reason`, default `false`; `validate!` raises
+is on)"`; the same class is raised for a reason of the wrong type (step 0).
+`config.require_bypass_reason`, default `false`; `validate!` raises
 `ConfigurationError` unless it is `true` or `false`.
 
 **Invariant 6.** The payload carries the host's reason, a tenant id and a
@@ -1497,21 +1672,46 @@ Model's lookup chain, so every host override wins, from the most specific
 
 ```ruby
 initializer "tenancy_dable.i18n" do |app|
-  app.config.i18n.load_path.unshift(*Dir[File.expand_path("locale/*.yml", __dir__)])
+  files = TenancyDable::Railtie.locale_files(app.config.i18n)
+  ActiveSupport.on_load(:i18n) { I18n.load_path |= files }
+end
+
+def self.locale_files(i18n_config)   # :nodoc:
+  # en.yml always; pt-BR.yml only when i18n_config[:default_locale] or
+  # i18n_config[:available_locales] (Symbols or Strings) includes pt-BR
 end
 ```
 
-Unshifting into the application's list puts the gem's file before the host's own
-locale files, so a host file loaded later overrides it; Rails copies the list into
-`I18n.load_path` when I18n initializes, after all initializers.
+*Order.* The first draft unshifted into `app.config.i18n.load_path`, and that list
+is appended to `I18n.load_path` AFTER the host's own `config/locales` paths, so
+the gem's file won and a host could not override a key (V2 B2, measured). Active
+Model registers its own defaults the other way round, and so does the gem now:
+`on_load(:i18n)` runs when I18n is first used, appending the gem's files to
+`I18n.load_path` before `I18n::Railtie.initialize_i18n` adds the host's
+`config/locales` and `config.i18n.load_path`. The gem's files therefore sit BEFORE
+the host's, a host file for the same key is loaded later and wins, at every level
+of the lookup chain above.
+
+*Conditional `pt-BR`.* Loading `pt-BR.yml` unconditionally added `pt-BR` to
+`I18n.available_locales` of every host. `locale_files` keeps it out of an
+English-only host: `pt-BR` loads only when the host declares it in
+`config.i18n.default_locale` or `config.i18n.available_locales`, and a `pt-BR` host
+therefore sees Portuguese defaults instead of Rails' translation-missing text. The
+initializer reads `app.config.i18n` at initializer time, so the declaration must
+be in `config/application.rb` or `config/environments/*.rb`; a setting made only in
+`config/initializers/*.rb` runs after the railtie's initializers and is not seen
+(that host adds the file itself or declares the locale earlier). The harness
+declares `config.i18n.available_locales = [:en, :"pt-BR"]`.
 
 **Compatibility.** `CrossTenantError::MESSAGE` stays, as a compatibility constant
 equal to the `:en` default (contract-locked). In `:en`, `errors[:attribute]` and
 `errors.added?(:parent, CrossTenantError::MESSAGE)` are unchanged; `errors.details`
 now carries `error: :cross_tenant` / `error: :last_owner` instead of the English
 String (the slug format error keeps `error: :invalid`). A host whose locale is
-neither `:en` nor `:"pt-BR"` must translate the three keys, or enable
-`config.i18n.fallbacks`; otherwise Rails renders its translation-missing text where
+neither `:en` nor `:"pt-BR"` must translate the three keys, or enable fallbacks
+that reach `:en` (`config.i18n.fallbacks = [:en]`; plain `fallbacks = true` falls
+back to the host's default locale, which is not `:en` for such a host);
+otherwise Rails renders its translation-missing text where
 0.4.0 rendered English (`UPGRADING.md`). A `pt-BR` host that wants its own wording
 overrides any key at any level of the chain above. Exception messages stay English.
 
@@ -1537,11 +1737,22 @@ overrides any key at any level of the chain above. Exception messages stay Engli
   `audit(models = nil)`; new constant `WITHOUT_TENANT_EVENT`. The isolation check
   runs in every writer.
 - **`Scoped` (§5.1):** `belongs_to_tenant(name = :tenant, tag: nil, **opts)`. Its
-  step list gains step 0 (declare, §16.3) and step 7 (create refusal, §16.2).
-- **`RelationExtension` (§5.2):** six read hooks, the `tenancy_pin_state`
-  classifier, bulk-write behaviour unchanged.
+  step list gains step 0 (declare, §16.3) and step 7 (foreign-tenant write
+  refusal, §16.2: three prepended callbacks). Its default scope returns the
+  relation `extending(BuiltWithoutTenant)` on the bypass and fail-open branches
+  (§16.1). Instance methods `touch`, `update_columns` and `delete` are owned by
+  `Scoped` (§16.2); `update_columns` raises `TenantImmutableError` on an FK rewrite.
+- **`RelationExtension` (§5.2):** eight read hooks (the six plus
+  `compute_cache_version` and `arel`), the `tenancy_pin_state` classifier,
+  bulk-write behaviour unchanged except that a Hash `update_all` naming the FK
+  raises `TenantImmutableError` (§16.1).
+- **`Job` (§14.2):** an unresolvable serialized tenant id raises
+  `TenantNotFoundError` (§16.2); no new error class (the symbol was reserved).
+- **`ActiveRecord::InsertAll`** is prepended with `InsertAllExtension` (§16.2).
 - **New symbols:** `Declarations`, `Declaration`, `Audit`, `Audit::Finding`,
-  `Audit::KINDS`, `Snapshot`; the `en` and `pt-BR` locale files; `rake tenancy_dable:audit`. Every
+  `Audit::KINDS`, `Snapshot`, `BuiltWithoutTenant` (§16.1), `InsertAllExtension`
+  (§16.2), `Railtie.locale_files` (`:nodoc:`, §16.6); the `en` and `pt-BR` locale
+  files (`pt-BR` conditional); `rake tenancy_dable:audit`. Every
   Active Record class responds to `tenant_global`, `tenancy_declaration`,
   `tenancy_global_reason`, `tenancy_tag`.
 - **§8 fixture schema, six tables:** adds `gadgets` (`tenant_id` NOT NULL and
@@ -1558,7 +1769,7 @@ overrides any key at any level of the chain above. Exception messages stay Engli
 
   | # | Invariant (amended) | Proven by (added) |
   |---|---|---|
-  | 2 | **No cross-tenant read path** — filter-by-tenant before ordering; a read pinned to another tenant, or whose tenant filter was removed, raises `CrossTenantReadError`; bulk writes guarded; a create into another tenant raises `CrossTenantWriteError`; resolution enforces membership. True as of 0.5.0 within the residuals of §16.1. | `spec/scoping/read_guard_spec.rb`, `spec/scoping/create_refusal_spec.rb`, red-team fourth way (read through the tenant's own association) |
+  | 2 | **No cross-tenant read path** — filter-by-tenant before ordering; a read pinned to another tenant, or whose tenant filter was removed, raises `CrossTenantReadError`; bulk writes guarded; a create, update, destroy, `touch`, `delete`, `update_columns`, `insert_all` or `upsert_all` into or of another tenant raises `CrossTenantWriteError`; resolution enforces membership. True as of 0.5.0 within the residuals of §16.1. | `spec/scoping/read_guard_spec.rb`, `spec/scoping/create_refusal_spec.rb`, `spec/scoping/foreign_record_write_spec.rb`, `spec/scoping/insert_all_guard_spec.rb`, red-team fourth way (read through the tenant's own association) |
   | 6 | **No PII/secret leakage** — audit-override logs, gem exception messages and the `without_tenant` event carry tenant ids (the event also the host's reason and a `file:line`), never record payloads | `spec/facade/without_tenant_audit_spec.rb` (payload keys exactly three; no record on raise) |
   | 7 | **(new) No shared tenant state across fibers** — under a fiber scheduler with thread isolation, a tenant-state write raises `UnsafeIsolationError` (default `:raise`) | `spec/facade/isolation_check_spec.rb` |
 
@@ -1580,9 +1791,23 @@ commit and stays green through every merge.
   `WITHOUT_TENANT_EVENT == "without_tenant.tenancy_dable"`.
 - `belongs_to_tenant`: the existing `[:opt, :name]` + `:keyrest` assertions stay;
   add `[:key, :tag]`.
-- RelationExtension: public `pluck exists? ids load_async` in `instance_methods`;
-  `exec_queries perform_calculation` in `private_instance_methods` and NOT in
-  `instance_methods`; the three bulk overrides unchanged.
+- RelationExtension: public `pluck exists? ids load_async compute_cache_version
+  arel` in `instance_methods` (and `ActiveRecord::Relation.public_method_defined?`
+  for the last two, so a Rails line that changes their visibility fails the
+  contract spec); `exec_queries perform_calculation` in `private_instance_methods`
+  and NOT in `instance_methods`; the three bulk overrides unchanged.
+- `TenancyDable::BuiltWithoutTenant` is a `Module` with no instance methods; a
+  relation built with no current tenant is a `BuiltWithoutTenant` and one built in
+  a tenant is not.
+- `ActiveRecord::InsertAll.ancestors` includes `TenancyDable::InsertAllExtension`,
+  ahead of `InsertAll` itself; the extension's guard is private.
+- `TenancyDable::Scoped` owns the instance methods `touch`, `update_columns` and
+  `delete` (`Widget.instance_method(name).owner`).
+- `without_tenant` refuses a `reason:` that is not `nil`, a String or a Symbol with
+  `BypassReasonError`, and still runs the block for the three valid kinds.
+- `TenancyDable::Railtie.locale_files(i18n_config)` returns only `en.yml` for an
+  English-only config (or an empty one) and `en.yml` + `pt-BR.yml` when `pt-BR` is
+  the `default_locale` or in `available_locales` (Symbol or String).
 - Error hierarchy: title "8 subclasses" → "12 subclasses"; the list gains
   `CrossTenantReadError CrossTenantWriteError UnsafeIsolationError
   BypassReasonError`. `CrossTenantError::MESSAGE` lock unchanged; add
@@ -1723,3 +1948,11 @@ measurements of §16.1/§16.2 reproduced by `read_guard_spec.rb` and
 `create_refusal_spec.rb` (the read guard and the create refusal meet in one
 example: `Widget`, which has a uniqueness validation, raises
 `CrossTenantWriteError`, not `CrossTenantReadError`).
+
+**Verification round.** After the four workstreams merged, a red-team and a
+contract audit drove three fixes (read side, write side, i18n/audit/bypass) that
+touched `relation_extension.rb`, `scoped.rb` (default scope and callbacks),
+`job.rb`, `railtie.rb`, `audit.rb` and `lib/tenancy_dable.rb`, and added
+`lib/tenancy_dable/insert_all_extension.rb`, `spec/scoping/foreign_record_write_spec.rb`
+and `spec/scoping/insert_all_guard_spec.rb`. §16.1-§16.8 above state the amended
+contract; the 0.5.0 count of specs is whatever the suite reports at release.
