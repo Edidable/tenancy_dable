@@ -9,10 +9,14 @@ derived edidable projects, see [UPGRADING.md](UPGRADING.md).
 
 ## [Unreleased]
 
-To be released as `0.5.0`. See [UPGRADING.md](UPGRADING.md#upgrading-to-v050).
+_Nothing yet._
+
+## [0.5.0] - 2026-10-10
+
+See [UPGRADING.md](UPGRADING.md#upgrading-to-v050).
 
 Three changes are **on by default and can raise in a host that works today**: the read
-guard, the refusal to WRITE into another tenant (create, update, destroy, `touch`,
+guard, the refusal to write into another tenant (create, update, destroy, `touch`,
 `delete`, `update_columns`, `insert_all`, `upsert_all`), and the fiber isolation check.
 A `TenancyDable::Job` whose tenant vanished before it ran also raises
 `TenantNotFoundError` now, instead of running with no tenant. Each
@@ -280,7 +284,8 @@ in [DESIGN.md](DESIGN.md); usage is in [README.md](README.md).
   `UPGRADING.md` (semver policy, cross-project bumps, and the skeleton → gem
   migration guide), and `DESIGN.md` (the frozen per-symbol contract).
 
-[Unreleased]: https://github.com/edidable/tenancy_dable/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/edidable/tenancy_dable/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/edidable/tenancy_dable/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/edidable/tenancy_dable/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/edidable/tenancy_dable/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/edidable/tenancy_dable/compare/v0.1.0...v0.2.0
