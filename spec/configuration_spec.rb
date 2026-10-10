@@ -41,4 +41,45 @@ RSpec.describe TenancyDable::Configuration do
       expect(config.validate!).to be(config)
     end
   end
+
+  # The five v0.5.0 settings (DESIGN.md §16.7): each default is accepted, and one
+  # bad value apiece is rejected naming the setting.
+  describe "#validate! — v0.5.0 settings" do
+    it "accepts every default" do
+      expect { config.validate! }.not_to raise_error
+    end
+
+    {
+      guard_reads: [false, "yes"],
+      require_bypass_reason: [true, nil],
+      isolation_check: [:warn, :explode],
+      audit_ignored_namespaces: [[:Foo, "Bar"], ["Foo", ""]],
+      audit_allowed: [{"Foo" => "reviewed"}, {"Foo" => ""}]
+    }.each do |setting, (good, bad)|
+      it "accepts #{good.inspect} for #{setting}" do
+        config.public_send(:"#{setting}=", good)
+        expect { config.validate! }.not_to raise_error
+      end
+
+      it "rejects #{bad.inspect} for #{setting} with ConfigurationError" do
+        config.public_send(:"#{setting}=", bad)
+        expect { config.validate! }.to raise_error(TenancyDable::ConfigurationError, /#{setting}/)
+      end
+    end
+
+    it "accepts isolation_check :off" do
+      config.isolation_check = :off
+      expect { config.validate! }.not_to raise_error
+    end
+
+    it "rejects an audit_ignored_namespaces that is not an Array" do
+      config.audit_ignored_namespaces = "ActiveStorage"
+      expect { config.validate! }.to raise_error(TenancyDable::ConfigurationError, /audit_ignored_namespaces/)
+    end
+
+    it "rejects an audit_allowed with a non-String key" do
+      config.audit_allowed = {Foo: "reviewed"}
+      expect { config.validate! }.to raise_error(TenancyDable::ConfigurationError, /audit_allowed/)
+    end
+  end
 end

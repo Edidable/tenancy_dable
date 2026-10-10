@@ -38,4 +38,14 @@ FactoryBot.define do
     tenant_id { tenant.id }
     parent_id { parent&.id }
   end
+
+  factory :gadget, class: "Gadget" do
+    sequence(:name) { |n| "Gadget #{n}" }
+
+    transient do
+      tenant { create(:tenant) }
+    end
+
+    tenant_id { tenant.id }
+  end
 end

@@ -26,7 +26,12 @@ RSpec.describe "Frozen public contract (PLAN.md)" do
       rls: false,
       audit_overrides: :log,
       on_tenant_not_found: :raise,
-      on_not_a_member: :not_a_member_error
+      on_not_a_member: :not_a_member_error,
+      guard_reads: true,
+      isolation_check: :raise,
+      require_bypass_reason: false,
+      audit_allowed: {},
+      audit_ignored_namespaces: %w[ActiveStorage ActionText ActionMailbox SolidQueue SolidCache SolidCable]
     }.each do |setting, default|
       it "#{setting} defaults to #{default.inspect}" do
         expect(config.public_send(setting)).to eq(default)
@@ -41,13 +46,18 @@ RSpec.describe "Frozen public contract (PLAN.md)" do
       expect(config.current_user_resolver).to respond_to(:call)
     end
 
-    # Lock the surface area itself: exactly 14 host-settable settings at v0.2.0
-    # (the 13 frozen at v0.1.0 plus on_not_a_member). Derived from the class's own
+    # Lock the surface area itself: exactly 19 host-settable settings (the 14 of
+    # v0.4.0 plus the five of §16.7). Derived from the class's own
     # writers, so adding or removing ANY setting without updating this contract
     # fails here, loudly. Each setting is one attr_accessor → one `name=` writer.
-    it "exposes exactly 14 settings (§4.1)" do
+    it "exposes exactly 19 settings (§4.1, §16.7)" do
       setters = TenancyDable::Configuration.instance_methods(false).grep(/=\z/)
-      expect(setters.size).to eq(14)
+      expect(setters.size).to eq(19)
+    end
+
+    it "gives each Configuration its own audit_ignored_namespaces Array, not frozen" do
+      expect(config.audit_ignored_namespaces).not_to be_frozen
+      expect(config.audit_ignored_namespaces).not_to equal(TenancyDable::Configuration.new.audit_ignored_namespaces)
     end
   end
 
@@ -56,10 +66,23 @@ RSpec.describe "Frozen public contract (PLAN.md)" do
       configure configuration reset_configuration!
       current_tenant current_tenant= current_membership current_membership=
       foreign_membership? with_tenant without_tenant pundit_context
+      snapshot carry audit
     ].each do |method_name|
       it "responds to .#{method_name}" do
         expect(TenancyDable).to respond_to(method_name)
       end
+    end
+
+    it "without_tenant takes only the optional keyword reason: (§16.5)" do
+      expect(TenancyDable.method(:without_tenant).parameters).to eq([[:key, :reason]])
+    end
+
+    it "audit takes an optional models argument (§16.3)" do
+      expect(TenancyDable.method(:audit).parameters).to eq([[:opt, :models]])
+    end
+
+    it "names the without_tenant notification (§16.5)" do
+      expect(TenancyDable::WITHOUT_TENANT_EVENT).to eq("without_tenant.tenancy_dable")
     end
 
     it "pundit_context takes keywords (user:, tenant:, membership:)" do
@@ -87,9 +110,9 @@ RSpec.describe "Frozen public contract (PLAN.md)" do
       expect(TenancyDable::Scoped).to be_a(ActiveSupport::Concern)
     end
 
-    it "exposes belongs_to_tenant(name = :tenant, **opts)" do
+    it "exposes belongs_to_tenant(name = :tenant, tag: nil, **opts)" do
       params = TenancyDable::Scoped::ClassMethods.instance_method(:belongs_to_tenant).parameters
-      expect(params).to include([:opt, :name])
+      expect(params).to include([:opt, :name], [:key, :tag])
       expect(params.map(&:first)).to include(:keyrest)
     end
 
@@ -99,11 +122,65 @@ RSpec.describe "Frozen public contract (PLAN.md)" do
     end
   end
 
-  describe "RelationExtension bulk-write guard (§5.2)" do
+  describe "RelationExtension guards (§5.2, §16.1)" do
     %i[update_all delete_all destroy_all].each do |method_name|
       it "overrides ##{method_name}" do
         expect(TenancyDable::RelationExtension.instance_methods).to include(method_name)
       end
+    end
+
+    %i[pluck exists? ids load_async].each do |method_name|
+      it "overrides ##{method_name} publicly (read guard)" do
+        expect(TenancyDable::RelationExtension.instance_methods).to include(method_name)
+      end
+    end
+
+    %i[exec_queries perform_calculation].each do |method_name|
+      it "overrides ##{method_name} privately (read guard)" do
+        expect(TenancyDable::RelationExtension.private_instance_methods).to include(method_name)
+        expect(TenancyDable::RelationExtension.instance_methods).not_to include(method_name)
+      end
+    end
+  end
+
+  describe "Declarations (§16.3)" do
+    %i[tenant_global tenancy_declaration tenancy_global_reason tenancy_tag].each do |method_name|
+      it "ActiveRecord::Base responds to .#{method_name}" do
+        expect(ActiveRecord::Base).to respond_to(method_name)
+      end
+    end
+
+    it "tenant_global takes because:, tag: and allow_tenant_fk:" do
+      params = ActiveRecord::Base.method(:tenant_global).parameters
+      expect(params).to include([:keyreq, :because], [:key, :tag], [:key, :allow_tenant_fk])
+    end
+
+    it "Declaration is a Data type of [kind, reason, tag, allow_tenant_fk]" do
+      expect(TenancyDable::Declaration.ancestors).to include(Data)
+      expect(TenancyDable::Declaration.members).to eq(%i[kind reason tag allow_tenant_fk])
+    end
+  end
+
+  describe "Audit (§16.3)" do
+    it "lists the three finding kinds" do
+      expect(TenancyDable::Audit::KINDS).to eq(%i[undeclared global_with_tenant_fk scoped_without_index])
+    end
+
+    it "Finding is a Data type of [model, kind, message]" do
+      expect(TenancyDable::Audit::Finding.ancestors).to include(Data)
+      expect(TenancyDable::Audit::Finding.members).to eq(%i[model kind message])
+    end
+
+    it "ships the rake task at its contract path" do
+      expect(File).to exist("lib/tenancy_dable/tasks/audit.rake")
+    end
+  end
+
+  describe "Snapshot (§16.4)" do
+    it "is a Data type of [tenant, membership, tenant_scope_disabled] with #restore" do
+      expect(TenancyDable::Snapshot.ancestors).to include(Data)
+      expect(TenancyDable::Snapshot.members).to eq(%i[tenant membership tenant_scope_disabled])
+      expect(TenancyDable::Snapshot.instance_methods).to include(:restore)
     end
   end
 
@@ -157,7 +234,7 @@ RSpec.describe "Frozen public contract (PLAN.md)" do
     end
   end
 
-  describe "Error hierarchy (§7) — 8 subclasses of TenancyDable::Error < StandardError" do
+  describe "Error hierarchy (§7, §16.7) — 12 subclasses of TenancyDable::Error < StandardError" do
     it "Error < StandardError" do
       expect(TenancyDable::Error).to be < StandardError
     end
@@ -165,6 +242,7 @@ RSpec.describe "Frozen public contract (PLAN.md)" do
     %i[
       NoTenantError TenantImmutableError BulkWriteError CrossTenantError
       NotAMemberError TenantNotFoundError TenantOverrideError ConfigurationError
+      CrossTenantReadError CrossTenantWriteError UnsafeIsolationError BypassReasonError
     ].each do |error_name|
       it "#{error_name} < TenancyDable::Error" do
         expect(TenancyDable.const_get(error_name)).to be < TenancyDable::Error
@@ -175,9 +253,19 @@ RSpec.describe "Frozen public contract (PLAN.md)" do
     # single source of truth for the cross-tenant belongs_to validation string,
     # so the formerly-dead class is now the message's home. Locked here (value and
     # all) as part of the frozen surface; Scoped ADDS it to errors, never raises.
-    # Error count is unchanged — still the 8 classes asserted above.
     it "CrossTenantError::MESSAGE is the frozen cross-tenant validation string" do
       expect(TenancyDable::CrossTenantError::MESSAGE).to eq("belongs to a different tenant")
+    end
+
+    # v0.5.0 (§16.6): the validation messages are I18n keys with gem-shipped
+    # defaults; MESSAGE stays as the compatibility constant equal to the :en one.
+    it "ships the :en and :pt-BR locales on I18n.load_path with the :en default equal to MESSAGE" do
+      expect(I18n.load_path.map(&:to_s)).to include(
+        a_string_ending_with("lib/tenancy_dable/locale/en.yml"),
+        a_string_ending_with("lib/tenancy_dable/locale/pt-BR.yml")
+      )
+      expect(I18n.t("errors.messages.cross_tenant", locale: :en)).to eq(TenancyDable::CrossTenantError::MESSAGE)
+      expect(I18n.t("errors.messages.cross_tenant", locale: :"pt-BR")).to eq("pertence a outro tenant")
     end
   end
 

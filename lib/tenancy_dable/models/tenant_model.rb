@@ -21,6 +21,8 @@ module TenancyDable
     SLUG_FORMAT = /\A[a-z0-9]+(?:-[a-z0-9]+)*\z/
 
     included do
+      tenant_global because: "the tenant model is the tenancy boundary itself"
+
       has_many :memberships,
         class_name: TenancyDable.configuration.membership_model,
         dependent: :destroy
@@ -34,7 +36,7 @@ module TenancyDable
       # let `presence` pass on a blank slug, so they are split.)
       validates :slug, presence: true, uniqueness: true
       validates :slug,
-        format: {with: SLUG_FORMAT, message: "must be lowercase letters, numbers, and single hyphens"},
+        format: {with: SLUG_FORMAT, message: :slug_format},
         allow_blank: true
 
       before_validation :generate_slug

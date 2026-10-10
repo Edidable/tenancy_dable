@@ -4,6 +4,8 @@ require "tenancy_dable/version"
 require "tenancy_dable/errors"
 require "tenancy_dable/configuration"
 require "tenancy_dable/current"
+require "tenancy_dable/snapshot"
+require "tenancy_dable/audit"
 require "tenancy_dable/policy/context"
 require "tenancy_dable/policy/base"
 require "tenancy_dable/railtie"
@@ -24,6 +26,9 @@ require "tenancy_dable/railtie"
 # context. The scoping engine, identity concerns, resolution, and authorization
 # layers are mixed in by the railtie as later phases land (see .midgal/PLAN.md).
 module TenancyDable
+  # Instrumented by `without_tenant` (§16.5).
+  WITHOUT_TENANT_EVENT = "without_tenant.tenancy_dable"
+
   class << self
     # --- configuration -----------------------------------------------------
 
@@ -104,12 +109,40 @@ module TenancyDable
     # Run a block with tenant scoping disabled (scoped models return `all`),
     # restoring the prior flag afterwards (nesting-safe). Returns the block's
     # value. Does not touch the tenant itself, so no audit/RLS hook fires.
-    def without_tenant
+    #
+    # `reason:` is accepted now; W4 fills in the reason check and the
+    # WITHOUT_TENANT_EVENT instrumentation (§16.5).
+    def without_tenant(reason: nil)
       previous = Current.tenant_scope_disabled
       Current.tenant_scope_disabled = true
       yield
     ensure
       Current.tenant_scope_disabled = previous
+    end
+
+    # --- context carrier and audit (v0.5.0; §16.3/§16.4) -------------------
+
+    # The raw tenant state of this thread or fiber, to restore on another.
+    def snapshot
+      Snapshot.new(
+        tenant: Current.tenant,
+        membership: Current.membership,
+        tenant_scope_disabled: Current.tenant_scope_disabled
+      )
+    end
+
+    # A lambda running the block inside the snapshot taken NOW:
+    # `Thread.new(&TenancyDable.carry { work })`.
+    def carry(&block)
+      raise LocalJumpError, "no block given (yield)" unless block
+
+      captured = snapshot
+      ->(*args, **kwargs) { captured.restore { block.call(*args, **kwargs) } }
+    end
+
+    # Findings for models whose tenancy is undeclared or suspicious (§16.3).
+    def audit(models = nil)
+      Audit.run(models)
     end
 
     # --- authorization builder (additive, introduced Phase 06; §6) ---------

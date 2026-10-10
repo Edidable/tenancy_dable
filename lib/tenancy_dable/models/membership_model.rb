@@ -19,6 +19,9 @@ module TenancyDable
     extend ActiveSupport::Concern
 
     included do
+      tenant_global because: "memberships are read before any tenant is current (DESIGN.md §5.3)",
+        allow_tenant_fk: true
+
       belongs_to :user, class_name: TenancyDable.configuration.user_model
       belongs_to :tenant, class_name: TenancyDable.configuration.tenant_model
 
@@ -68,7 +71,7 @@ module TenancyDable
         .where.not(id: id)
       return if other_owners.exists?
 
-      errors.add(:role, "cannot be changed: a tenant must keep at least one owner")
+      errors.add(:role, :last_owner)
       throw :abort
     end
   end

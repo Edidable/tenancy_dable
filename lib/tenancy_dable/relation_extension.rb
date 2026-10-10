@@ -28,7 +28,44 @@ module TenancyDable
       super
     end
 
+    # Read hooks (§16.1). INERT STUB (foundation): each calls
+    # `tenancy_guard_read!`, which never raises until W1 fills it in.
+    def pluck(...)
+      tenancy_guard_read!
+      super
+    end
+
+    def exists?(...)
+      tenancy_guard_read!
+      super
+    end
+
+    def ids(...)
+      tenancy_guard_read!
+      super
+    end
+
+    def load_async(...)
+      tenancy_guard_read!
+      super
+    end
+
     private
+
+    def exec_queries(...)
+      tenancy_guard_read!
+      super
+    end
+
+    def perform_calculation(...)
+      tenancy_guard_read!
+      super
+    end
+
+    # §16.1 fills this in (W1).
+    def tenancy_guard_read!
+      nil
+    end
 
     def tenancy_guard_bulk_write!
       return unless klass.respond_to?(:tenant_scoped?) && klass.tenant_scoped?

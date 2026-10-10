@@ -30,11 +30,13 @@ module TenancyDable
       # Declare this model tenant-scoped on the `name` association (default
       # `:tenant`), keyed by `config.tenant_fk` (default `:tenant_id`).
       #
-      # Installs, in order: the `belongs_to`, the `tenant_scoped?` class
+      # Installs, in order: the tenancy declaration (§16.3), the `belongs_to`, the `tenant_scoped?` class
       # predicate, the fail-closed default scope, create-time fk auto-assignment,
       # the post-create fk immutability guard, and the cross-tenant `belongs_to`
       # validation. See DESIGN.md §5.1 — the decision trees there are frozen.
-      def belongs_to_tenant(name = :tenant, **opts)
+      def belongs_to_tenant(name = :tenant, tag: nil, **opts)
+        tenancy_declare!(:scoped, tag: tag) # a re-declaration raises before anything is installed
+
         # Structural: bound once, at declaration time.
         fk = TenancyDable.configuration.tenant_fk
 
@@ -117,7 +119,7 @@ module TenancyDable
             target_tenant_id = assoc_klass.unscoped.where(id: assoc_id).pick(fk)
             next if target_tenant_id.nil? || target_tenant_id == self_tenant_id
 
-            errors.add(reflection.name, TenancyDable::CrossTenantError::MESSAGE)
+            errors.add(reflection.name, :cross_tenant)
           end
         end
       end

@@ -27,11 +27,26 @@ module TenancyDable
       TenancyDable::Railtie.install_action_controller!
     end
 
+    # The gem's own validation messages (§16.6). Unshifted so a host's locale
+    # files, loaded later, override them.
+    initializer "tenancy_dable.i18n" do |app|
+      app.config.i18n.load_path.unshift(*Dir[File.expand_path("locale/*.yml", __dir__)])
+    end
+
+    rake_tasks do
+      load File.expand_path("tasks/audit.rake", __dir__)
+    end
+
     # Wire the scoping engine into ActiveRecord (Phase 03) and make the identity
     # concerns (Phase 04) available. Loaded lazily here, on `:active_record`,
     # rather than from the entry file so the units that need AR only load once it
     # is present (DESIGN.md §2).
     def self.install_active_record!
+      # Declarations first (§16.3): the macro and readers reach every Active
+      # Record class, and the identity concerns below declare themselves on it.
+      require "tenancy_dable/declarations"
+      ActiveRecord::Base.extend(TenancyDable::Declarations)
+
       require "tenancy_dable/scoped"
       require "tenancy_dable/relation_extension"
 
