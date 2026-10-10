@@ -9,7 +9,7 @@ derived edidable projects, see [UPGRADING.md](UPGRADING.md).
 
 ## [Unreleased]
 
-To be released as `0.5.0`. See [UPGRADING.md](UPGRADING.md#behavior-differences-to-expect).
+To be released as `0.5.0`. See [UPGRADING.md](UPGRADING.md#upgrading-to-v050).
 
 Three changes are **on by default and can raise in a host that works today**: the read
 guard, the refusal to create into another tenant, and the fiber isolation check. Each
@@ -39,9 +39,26 @@ see [UPGRADING.md](UPGRADING.md#pre-10-caveat)). The contract is
   `a.widgets.create!`, `Widget.create!(tenant: a)`, `Widget.create!(tenant_id: a.id)`
   and `save(validate: false)` with another tenant's id persisted a row in tenant A. They
   now raise `TenancyDable::CrossTenantWriteError`, with or without validators.
+- **The read guard also refuses** `invert_where`, `where.not`, ranges and subqueries on
+  the tenant column (also through `merge` and `unscoped`), table-keyed
+  `unscope(where: {widgets: :tenant_id})`, a relation built with no tenant (or inside
+  `without_tenant`) and loaded inside a tenant, `cache_key`/`cache_version` of a
+  refused relation, and a refused relation used as a subquery. `to_sql` and `arel`
+  on a refused relation raise.
+- **Writing to another tenant's record is refused.** Updating, destroying, touching,
+  `update_columns` and `delete` of a record of another tenant, and `valid?` on it,
+  raise `CrossTenantWriteError` (0.4.0 persisted the change, or failed only in a
+  validator). `insert_all`, `upsert_all` and their relatives raise when a row names
+  another tenant, and an upsert raises when its conflict target does not include
+  the tenant column (the primary key, or any upsert on an adapter without conflict
+  targets).
+- **`update_all(tenant_id: ...)` and `update_columns(tenant_id: ...)` raise
+  `TenantImmutableError`.**
 - The guard targets the shapes Active Record produces on its own. Explicit relation
-  surgery stays possible and is documented as a residual: `Model.unscoped`,
-  SQL-string predicates and raw SQL (see the README).
+  surgery stays possible and is documented as a residual: `Model.unscoped` with no
+  tenant predicate, `except(:where)`, `only`, an `or` with an unscoped relation,
+  SQL-string predicates, raw SQL, `reload` by id and the cache key of an already
+  loaded association (see the README).
 
 ### Added
 
@@ -64,7 +81,8 @@ see [UPGRADING.md](UPGRADING.md#pre-10-caveat)). The contract is
   something subscribes; `require_bypass_reason = true` makes a blank reason raise
   `BypassReasonError`.
 - **Locales.** The gem ships `en` and `pt-BR` translations for its three validation
-  messages (`cross_tenant`, `last_owner`, `slug_format`).
+  messages (`cross_tenant`, `last_owner`, `slug_format`); a host's own locale files
+  override them.
 - **Settings:** `guard_reads`, `isolation_check`, `require_bypass_reason`,
   `audit_allowed`, `audit_ignored_namespaces`. **Errors:** `CrossTenantReadError`,
   `CrossTenantWriteError`, `UnsafeIsolationError`, `BypassReasonError`.
@@ -75,13 +93,33 @@ see [UPGRADING.md](UPGRADING.md#pre-10-caveat)). The contract is
   last-owner error and the slug-format error resolve through `errors.messages.*`. In
   `en` the text is unchanged and `errors[:attribute]` reads the same. `errors.details`
   now carries the symbols `:cross_tenant` and `:last_owner` instead of an English
-  String. A host in another locale translates the three keys or enables fallbacks.
+  String. A host in another locale translates the three keys or enables fallbacks that reach `:en`.
 - **Reads and creates that used to be safe-but-empty now raise.** `Widget.where(tenant_id:
   other)` and `IN` lists across tenants, a preload of another tenant's owners, and
   creating a record with another tenant's id used to return nothing, the current
   tenant's rows, or (for creates) write into the other tenant. Fix the call site with
   `with_tenant(other) { ... }`, or `without_tenant(reason: "...") { ... }` when the
   crossing is deliberate.
+- **Locale loading.** A host's own locale files now override the gem's for the same
+  key. `en` always loads; `pt-BR` loads only when the host declares it in
+  `config.i18n.default_locale` or `config.i18n.available_locales` in
+  `config/application.rb`, so an English-only host's `I18n.available_locales` does
+  not gain `pt-BR`. A `pt-BR` host now sees Portuguese where 0.4.0 showed literal
+  English. Fallbacks must reach `:en` (`config.i18n.fallbacks = [:en]`).
+- **`TenancyDable::Job`** raises `TenancyDable::TenantNotFoundError` when the tenant
+  it was enqueued in no longer exists, instead of running under no tenant.
+- **`without_tenant(reason:)`** accepts only `nil`, a String or a Symbol (anything
+  else raises `BypassReasonError`); `call_site` is an absolute path.
+- **The audit** reports a global model that shares a scoped model's table as
+  `:global_with_tenant_fk` even with `allow_tenant_fk: true`, and skips only real STI
+  subclasses.
+- **Fiber docs.** With `require_tenant` off, a thread or fiber that lost the context
+  reads every tenant (the fail-open default): set `require_tenant = true` and use
+  `carry`. The isolation check also fires for host code that opens an `Async`/`Sync`
+  reactor under thread isolation. Write tenant state only through the facade.
+- **New class methods on every Active Record class** (`tenant_global`,
+  `tenancy_declaration`, `tenancy_global_reason`, `tenancy_tag`) can collide with a
+  host macro of the same name on `ApplicationRecord`.
 
 ## [0.4.0] - 2026-09-28
 

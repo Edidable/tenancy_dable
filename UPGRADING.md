@@ -114,7 +114,10 @@ bin/rails db:migrate                       # if the bump shipped new migrations
 bundle exec rspec                          # your app's suite is the acceptance gate
 ```
 
-Read this gem's [CHANGELOG.md](CHANGELOG.md) before a MINOR/MAJOR bump. The install
+Read this gem's [CHANGELOG.md](CHANGELOG.md) before a MINOR/MAJOR bump. Bumping
+from 0.4.0 to 0.5.0 changes behavior on purpose (reads, writes and the isolation
+check now raise where they used to leak): read [Upgrading to v0.5.0](#upgrading-to-v050)
+first, it lives under §3 below. The install
 generator never overwrites a host-edited file, so re-running it only *adds* anything
 new a release introduced.
 
@@ -357,7 +360,17 @@ or has been removed, is refused. That covers:
   `.count`, `.pluck`, `.exists?`, `other.widget_ids`, or a `has_one`;
 - a preload across tenants: `Tenant.where(id: [a.id, b.id]).includes(:widgets)`;
 - `rewhere(tenant_id: other.id)`, `merge` with an unscoped relation,
-  `unscope(where: :tenant_id)` and an `or` that mixes the tenant predicate in;
+  `unscope(where: :tenant_id)` (also the table-keyed form
+  `unscope(where: {widgets: :tenant_id})`) and an `or` that mixes the tenant
+  predicate in;
+- a tenant predicate that is not an equality: `invert_where`,
+  `where.not(tenant_id: ...)`, a range, or a subquery on the tenant column, also
+  when it arrives through `merge` or `unscoped`;
+- a relation **built** with no tenant current (or inside `without_tenant`) and
+  **loaded** inside a tenant, unless it is pinned to the current tenant;
+- `cache_key`, `cache_version` and `cache_key_with_version` of a refused relation,
+  and a refused relation used as a subquery, `from` or `with` of another model.
+  As a consequence `to_sql` and `arel` on a refused relation raise too;
 - `other.widgets.destroy_all`, and destroying another tenant whose `dependent:`
   associations must be loaded.
 
@@ -373,16 +386,36 @@ end
 ```
 
 Escape hatch: `config.guard_reads = false` restores the 0.4.0 read behaviour
-across the app. The guard does not touch `Model.unscoped`, SQL-string predicates
-or raw SQL (documented residuals, see the README), and does nothing inside
-`without_tenant` or with no current tenant.
+across the app. The guard does nothing inside `without_tenant`, or when no tenant
+is current at the moment of the read.
 
-**Creating a record in another tenant raises `CrossTenantWriteError`.** Inside
+Documented residuals (see the README): `Model.unscoped` with **no** tenant
+predicate passes, but `Model.unscoped.where(tenant_id: other.id)` is refused like
+any other pin; `except(:where)`, `only(...)`, an `or` with an unscoped relation,
+SQL-string predicates, raw SQL, `reload` by id, and the cache key of an association
+that is already loaded.
+
+**`update_all(tenant_id: ...)` raises `TenantImmutableError`**, like the
+`tenant_id=` writer, except inside `without_tenant`. `update_columns(tenant_id: ...)`
+and `update_column` with a different id raise it too. A SQL-string `update_all`
+is a residual.
+
+**Writing into another tenant raises `CrossTenantWriteError`.** Inside
 `with_tenant(b)`, `Widget.create!(tenant_id: a.id)`, `Widget.create!(tenant: a)`,
 `a.widgets.create!` and `save(validate: false)` with another tenant's id used to
-persist a row in tenant A. They raise now, whatever validators the model has. There
-is no setting for this one. The fix is `with_tenant(target) { create }`, or
-`without_tenant(reason: "...") { create }`.
+persist a row in tenant A. They raise now, whatever validators the model has. So
+does changing a record that already belongs to another tenant: `update`, `destroy`,
+`touch`, `update_columns` and `delete` (and `valid?` on it), where 0.4.0 persisted
+the change or, for a model with `validates_uniqueness_to_tenant`, failed in a
+validator. `insert_all`, `insert_all!` and `upsert_all` are refused when a row
+names another tenant, or when it goes through another tenant's relation
+(`a.widgets.insert_all`). An **upsert** is also refused when its conflict target
+does not include the tenant column, because it could overwrite another tenant's
+row: that covers the primary key and, on an adapter without conflict targets such
+as MySQL, every upsert on a scoped model inside a tenant. There is no setting for
+this one. The fix is `with_tenant(record.tenant) { write }`, a unique index that
+includes the tenant column (named in `unique_by:`), or
+`without_tenant(reason: "...") { write }`.
 
 This reaches **host test suites** that build other-tenant fixtures while a tenant
 is current (a `before` block that enters tenant A and then calls
@@ -410,8 +443,26 @@ config.active_support.isolation_level = :fiber
 
 Escape hatch while you migrate: `config.isolation_check = :warn` (logs every
 detected write and carries on) or `:off`. Puma, Sidekiq and rake never have a
-scheduler, so they are unaffected. To run work on another thread with the tenant,
-use `TenancyDable.carry { ... }` or `TenancyDable.snapshot` (README).
+scheduler, so they are unaffected, unless your own code opens an `Async { }` or
+`Sync { }` reactor inside them: the check fires there under thread isolation. To
+run work on another thread with the tenant, use `TenancyDable.carry { ... }` or
+`TenancyDable.snapshot` (README).
+
+With `require_tenant` off (the default), a thread or fiber that lost the context
+reads every tenant: that is the fail-open default. A host that spawns threads or
+uses fibers should set `require_tenant = true` and `carry` the context. Write
+tenant state only through the facade (`current_tenant=`, `with_tenant`,
+`without_tenant`): `Current.set` and `Current.tenant=` skip the isolation check, the
+audit and the RLS hook.
+
+**`TenancyDable::Job` raises when its tenant is gone.** A job enqueued in a tenant
+that was deleted before it runs now raises `TenancyDable::TenantNotFoundError`; in
+0.4.0 it ran under no tenant. A job enqueued outside any tenant is unchanged. Add
+`discard_on TenancyDable::TenantNotFoundError` to `ApplicationJob` if dropping it is
+the right outcome.
+
+**`without_tenant(reason:)` takes only `nil`, a String or a Symbol**; anything else
+raises `BypassReasonError`. The event's `call_site` is an absolute path.
 
 **A second tenancy declaration raises `ConfigurationError`.** `belongs_to_tenant`
 and `tenant_global` each declare a model's tenancy once, and a subclass inherits its
@@ -423,11 +474,25 @@ includes one of them must not declare again.
 **Validation messages are I18n keys.** The cross-tenant `belongs_to` error, the
 last-owner error and the slug-format error moved from literal English strings to the
 keys `cross_tenant`, `last_owner` and `slug_format` under `errors.messages`. The gem
-ships `en` and `pt-BR`. In those two locales nothing visible changes. In any other
-locale, translate the three keys in your own locale file, or enable
-`config.i18n.fallbacks`; otherwise Rails shows its "translation missing" text where
-0.4.0 showed English. Any key can be overridden at any level of Active Model's lookup
+ships `en` and `pt-BR`. In `en` nothing visible changes. In any other locale,
+translate the three keys in your own locale file, or enable fallbacks that reach
+`:en` (`config.i18n.fallbacks = [:en]`; plain `fallbacks = true` falls back to
+your default locale only, which is not `:en` for most such hosts); otherwise Rails
+shows its "translation missing" text where 0.4.0 showed English. Any key can be
+overridden at any level of Active Model's lookup
 (`activerecord.errors.models.<model>.attributes.<attribute>.<key>` and so on).
+
+Three host-visible details:
+
+- **Your locale files win.** A host file defining the same key overrides the gem's.
+- **`pt-BR` loads only when the host declares it**, in `config.i18n.default_locale`
+  or `config.i18n.available_locales` in `config/application.rb` (an initializer runs
+  too late to be seen). An English-only host's `I18n.available_locales` does not
+  gain `pt-BR`.
+- **A `pt-BR` host now sees Portuguese** where 0.4.0 showed English for the
+  last-owner, slug-format and cross-tenant messages (those were literal English in
+  0.4.0 whatever the locale). A page, or a spec that asserts the English text,
+  changes.
 
 `errors.details` also changed: it carries the symbols `:cross_tenant` and
 `:last_owner` instead of the English String (the slug-format error keeps `:invalid`).
@@ -437,8 +502,8 @@ needs the symbol. Exception messages stay English.
 
 ### Adopting declarations and the audit
 
-New in v0.5.0 and **opt-in to run**: nothing raises at boot, and the audit only
-runs when you call it. Every model is either tenant-scoped or global, and "global
+New in v0.5.0 and **opt-in to run**: nothing raises at boot unless a model declares
+twice or calls `tenant_global` wrongly, and the audit only runs when you call it. Every model is either tenant-scoped or global, and "global
 because we forgot" is the failure the audit exists to catch.
 
 1. Declare every model that is not scoped, with a reason:
@@ -477,6 +542,17 @@ because we forgot" is the failure the audit exists to catch.
 
    Active Storage, Action Text, Action Mailbox and the Solid* tables are ignored by
    default.
+
+A global model that shares a scoped model's table is reported as
+`:global_with_tenant_fk` even with `allow_tenant_fk: true`, and only real STI
+subclasses (same table as their base class) are skipped.
+
+**Name collisions.** The gem adds the class methods `tenant_global`,
+`tenancy_declaration`, `tenancy_global_reason` and `tenancy_tag` to every Active
+Record class. A host macro of the same name on `ApplicationRecord` (an in-house
+`tenant_global`, say) shadows the gem's, and the identity concerns' own
+`tenant_global because:` would then call the host's. Retire the host macro, or
+rename it, when you adopt the gem's.
 
 To make `without_tenant` accountable, set `config.require_bypass_reason = true` and
 add a `reason:` to each call; subscribe to `"without_tenant.tenancy_dable"` to log
