@@ -95,6 +95,17 @@ RSpec.describe "TenancyDable validation messages (i18n)" do
     end
   end
 
+  describe "load order (B2)" do
+    it "puts the gem's locale files before the host's, so a host file wins" do
+      gem_en = File.expand_path("../../lib/tenancy_dable/locale/en.yml", __dir__)
+      host_en = File.expand_path("../internal/config/locales/en.yml", __dir__)
+      paths = I18n.load_path.map(&:to_s)
+
+      expect(paths.index(gem_en)).to be < paths.index(host_en)
+      expect(I18n.t("harness_only.host_locale_loaded", locale: :en)).to eq("host locale file")
+    end
+  end
+
   describe "errors.details" do
     it "carries :cross_tenant" do
       expect(cross_tenant_widget.errors.details[:parent]).to eq([{error: :cross_tenant}])

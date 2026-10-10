@@ -65,6 +65,25 @@ RSpec.describe TenancyDable::Audit do
       expect(TenancyDable.audit([model])).to be_empty
     end
 
+    it "flags a global model on the table of a scoped model, even with allow_tenant_fk" do
+      scoped = stub_model("ScopedGadget", table: "gadgets") {
+        include TenancyDable::Scoped
+
+        belongs_to_tenant
+      }
+      twin = stub_model("GlobalGadget", table: "gadgets") { tenant_global because: "x", allow_tenant_fk: true }
+      findings = TenancyDable.audit([scoped, twin])
+
+      expect(findings.map { |f| [f.model, f.kind] }).to eq([[twin, :global_with_tenant_fk]])
+      expect(findings.first.message).to include("shares its table with a tenant-scoped model")
+    end
+
+    it "does not flag the same global model when no scoped model shares its table" do
+      twin = stub_model("GlobalGadget", table: "gadgets") { tenant_global because: "x", allow_tenant_fk: true }
+
+      expect(TenancyDable.audit([twin])).to be_empty
+    end
+
     it "does not flag a global model with no such column" do
       model = stub_model("Plain") { tenant_global because: "x" }
       allow(model).to receive(:column_names).and_return(%w[id name])
@@ -139,6 +158,15 @@ RSpec.describe TenancyDable::Audit do
       allow(child).to receive(:base_class).and_return(parent)
 
       expect(TenancyDable.audit([child])).to be_empty
+    end
+
+    it "audits a subclass that points at another table, since it is not STI" do
+      parent = stub_model("Parent") { tenant_global because: "x" }
+      child = Class.new(parent) { self.table_name = "gadgets" }
+      stub_const("Child", child)
+      allow(child).to receive(:base_class).and_return(parent)
+
+      expect(TenancyDable.audit([child]).map { |f| [f.model, f.kind] }).to eq([[child, :global_with_tenant_fk]])
     end
 
     it "skips anonymous classes in the no-argument form" do

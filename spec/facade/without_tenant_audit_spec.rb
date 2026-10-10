@@ -88,6 +88,21 @@ RSpec.describe "TenancyDable.without_tenant audit" do
       end
     end
 
+    [Object.new, 42, ["why"], {why: 1}, 1.5, true].each do |bad|
+      it "raises BypassReasonError for a #{bad.class} reason, before any event or state change" do
+        flag = :untouched
+        expect { TenancyDable.without_tenant(reason: bad) { flag = :ran } }
+          .to raise_error(TenancyDable::BypassReasonError, /String or a Symbol/)
+        expect(flag).to eq(:untouched)
+        expect(events).to be_empty
+        expect(TenancyDable::Current.tenant_scope_disabled).to be_nil
+      end
+    end
+
+    it "accepts a Symbol reason" do
+      expect(TenancyDable.without_tenant(reason: :backfill) { 1 }).to eq(1)
+    end
+
     it "makes BypassReasonError a TenancyDable::Error" do
       expect(TenancyDable::BypassReasonError.ancestors).to include(TenancyDable::Error)
     end

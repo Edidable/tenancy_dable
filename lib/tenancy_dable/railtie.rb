@@ -27,14 +27,29 @@ module TenancyDable
       TenancyDable::Railtie.install_action_controller!
     end
 
-    # The gem's own validation messages (§16.6). Unshifted so a host's locale
-    # files, loaded later, override them.
+    # The gem's own validation messages (§16.6). Registered the way Active Model
+    # registers its defaults: appended to `I18n.load_path` here, before
+    # `I18n::Railtie.initialize_i18n` adds the host's `config/locales` and
+    # `config.i18n.load_path` after them, so a host file for the same key wins.
+    # The initializer runs where the host's `config.i18n` is known, which is how
+    # `pt-BR` stays out of an English-only host's `I18n.available_locales`.
     initializer "tenancy_dable.i18n" do |app|
-      app.config.i18n.load_path.unshift(*Dir[File.expand_path("locale/*.yml", __dir__)])
+      files = TenancyDable::Railtie.locale_files(app.config.i18n)
+      ActiveSupport.on_load(:i18n) { I18n.load_path |= files }
     end
 
     rake_tasks do
       load File.expand_path("tasks/audit.rake", __dir__)
+    end
+
+    # The gem's locale files for a host's `config.i18n` (§16.6): `en` always,
+    # `pt-BR` only when the host declares it in `default_locale` or
+    # `available_locales` (symbols or strings). :nodoc:
+    def self.locale_files(i18n_config)
+      dir = File.expand_path("locale", __dir__)
+      declared = [i18n_config[:default_locale], *i18n_config[:available_locales]].compact.map(&:to_s)
+      names = declared.include?("pt-BR") ? %w[en pt-BR] : %w[en]
+      names.map { |name| File.join(dir, "#{name}.yml") }
     end
 
     # Wire the scoping engine into ActiveRecord (Phase 03) and make the identity

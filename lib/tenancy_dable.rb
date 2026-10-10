@@ -126,6 +126,11 @@ module TenancyDable
     # flag. The event carries the host's reason, the tenant id and the call site,
     # never a record (invariant 6).
     def without_tenant(reason: nil)
+      unless reason.nil? || reason.is_a?(String) || reason.is_a?(Symbol)
+        raise BypassReasonError,
+          "without_tenant reason: must be a String or a Symbol, got #{reason.class}"
+      end
+
       if configuration.require_bypass_reason && (reason.nil? || reason.to_s.strip.empty?)
         raise BypassReasonError,
           "without_tenant requires a non-blank reason: (config.require_bypass_reason is on)"

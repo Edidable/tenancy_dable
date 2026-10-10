@@ -18,9 +18,9 @@ module TenancyDable
       config = TenancyDable.configuration
       fk = config.tenant_fk.to_s
 
-      findings = candidates(models).flat_map do |model|
-        skip?(model, config) ? [] : findings_for(model, fk)
-      end
+      audited = candidates(models).reject { |model| skip?(model, config) }
+      scoped_tables = audited.select { |m| m.tenancy_declaration&.kind == :scoped }.to_set(&:table_name)
+      findings = audited.flat_map { |model| findings_for(model, fk, scoped_tables) }
 
       findings.sort_by { |f| [f.model.name.to_s, KINDS.index(f.kind)] }.freeze
     end
@@ -37,21 +37,33 @@ module TenancyDable
     def self.skip?(model, config)
       name = model.name.to_s
       model.abstract_class? ||
-        model.base_class != model || # STI subclass: its base class answers for the table
+        sti_subclass?(model) || # its base class answers for the table
         config.audit_ignored_namespaces.any? { |ns| name == ns.to_s || name.start_with?("#{ns}::") } ||
         config.audit_allowed.key?(name)
     end
     private_class_method :skip?
 
-    def self.findings_for(model, fk)
+    # Real STI only: a subclass that points at another table is its own model.
+    def self.sti_subclass?(model)
+      model.base_class != model && model.table_name == model.base_class.table_name
+    end
+    private_class_method :sti_subclass?
+
+    def self.findings_for(model, fk, scoped_tables)
       declaration = model.tenancy_declaration
       found = []
       found << finding(model, :undeclared, "declares no tenancy; add belongs_to_tenant, or tenant_global because: \"...\"") if declaration.nil?
 
-      if declaration&.kind == :global && !declaration.allow_tenant_fk && model.table_exists? && model.column_names.include?(fk)
-        found << finding(model, :global_with_tenant_fk,
-          "is declared tenant_global but has a #{fk} column; scope it with belongs_to_tenant, " \
-          "or pass allow_tenant_fk: true if it is deliberately unscoped")
+      if declaration&.kind == :global && model.table_exists? && model.column_names.include?(fk)
+        if scoped_tables.include?(model.table_name)
+          # allow_tenant_fk cannot excuse it: a scoped model reads the same rows.
+          found << finding(model, :global_with_tenant_fk,
+            "is declared tenant_global but shares its table with a tenant-scoped model")
+        elsif !declaration.allow_tenant_fk
+          found << finding(model, :global_with_tenant_fk,
+            "is declared tenant_global but has a #{fk} column; scope it with belongs_to_tenant, " \
+            "or pass allow_tenant_fk: true if it is deliberately unscoped")
+        end
       end
 
       if declaration&.kind == :scoped && model.table_exists? && !fk_indexed?(model, fk)
