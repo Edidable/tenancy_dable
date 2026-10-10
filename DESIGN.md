@@ -1290,7 +1290,7 @@ namespace :tenancy_dable do
   desc "Report models whose tenancy is undeclared or suspicious (exits 1 on findings)"
   task audit: :environment do
     findings = TenancyDable.audit
-    abort(findings.map(&:to_s).join("\n")) if findings.any?
+    abort(findings.join("\n")) if findings.any?
     puts "tenancy_dable:audit: every model declares its tenancy"
   end
 end
