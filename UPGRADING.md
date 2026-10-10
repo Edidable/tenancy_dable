@@ -341,6 +341,147 @@ the behavior differences below.
   you configure a role called `manager`, those two senses collide — pick a different
   role name.
 
+### Upgrading to v0.5.0
+
+v0.5.0 is a `0.MINOR` bump that turns three leaks into refusals. Run your suite
+after `bundle update`: anything below that raises was reading or writing across
+tenants and getting either nothing or another tenant's rows.
+
+**Reads pinned to another tenant raise `CrossTenantReadError`.** While a tenant is
+current, a read on a scoped model whose tenant filter points at a different tenant,
+or has been removed, is refused. That covers:
+
+- `Widget.where(tenant_id: other.id)` and `Widget.where(tenant_id: [a.id, b.id])`
+  (an `IN` list is a multi-tenant read, even when it contains the current tenant);
+- a read through another tenant's association, such as `other.widgets.to_a`,
+  `.count`, `.pluck`, `.exists?`, `other.widget_ids`, or a `has_one`;
+- a preload across tenants: `Tenant.where(id: [a.id, b.id]).includes(:widgets)`;
+- `rewhere(tenant_id: other.id)`, `merge` with an unscoped relation,
+  `unscope(where: :tenant_id)` and an `or` that mixes the tenant predicate in;
+- `other.widgets.destroy_all`, and destroying another tenant whose `dependent:`
+  associations must be loaded.
+
+Fix each call site by entering the tenant, or, when crossing is the point, by
+bypassing on purpose:
+
+```ruby
+TenancyDable.with_tenant(other) { Widget.count }
+
+TenancyDable.without_tenant(reason: "nightly usage report") do
+  Widget.where(tenant_id: [a.id, b.id]).group(:tenant_id).count
+end
+```
+
+Escape hatch: `config.guard_reads = false` restores the 0.4.0 read behaviour
+across the app. The guard does not touch `Model.unscoped`, SQL-string predicates
+or raw SQL (documented residuals, see the README), and does nothing inside
+`without_tenant` or with no current tenant.
+
+**Creating a record in another tenant raises `CrossTenantWriteError`.** Inside
+`with_tenant(b)`, `Widget.create!(tenant_id: a.id)`, `Widget.create!(tenant: a)`,
+`a.widgets.create!` and `save(validate: false)` with another tenant's id used to
+persist a row in tenant A. They raise now, whatever validators the model has. There
+is no setting for this one. The fix is `with_tenant(target) { create }`, or
+`without_tenant(reason: "...") { create }`.
+
+This reaches **host test suites** that build other-tenant fixtures while a tenant
+is current (a `before` block that enters tenant A and then calls
+`create(:widget, tenant: other)`). Build those records inside their own tenant, or
+in the example before entering one:
+
+```ruby
+other_widget = TenancyDable.with_tenant(other) { create(:widget) }
+```
+
+A new record with a blank tenant id still takes the current tenant, and an explicit
+id equal to the current tenant is accepted, as before.
+
+**The isolation check raises under a fiber scheduler (`UnsafeIsolationError`).**
+Rails keeps `Current` per thread by default. Under a fiber scheduler (a
+fiber-per-request server, anything on `async`) every fiber on the thread would share
+one tenant, so a request could read the tenant another request wrote. The first
+tenant write under a scheduler with `isolation_level = :thread` now raises. Fix the
+cause:
+
+```ruby
+# config/application.rb
+config.active_support.isolation_level = :fiber
+```
+
+Escape hatch while you migrate: `config.isolation_check = :warn` (logs every
+detected write and carries on) or `:off`. Puma, Sidekiq and rake never have a
+scheduler, so they are unaffected. To run work on another thread with the tenant,
+use `TenancyDable.carry { ... }` or `TenancyDable.snapshot` (README).
+
+**A second tenancy declaration raises `ConfigurationError`.** `belongs_to_tenant`
+and `tenant_global` each declare a model's tenancy once, and a subclass inherits its
+parent's declaration. A model that calls both, calls either twice, or re-declares
+below a declared parent fails at class load. `TenantModel`, `UserModel` and
+`MembershipModel` now declare themselves `tenant_global`, so a host model that
+includes one of them must not declare again.
+
+**Validation messages are I18n keys.** The cross-tenant `belongs_to` error, the
+last-owner error and the slug-format error moved from literal English strings to the
+keys `cross_tenant`, `last_owner` and `slug_format` under `errors.messages`. The gem
+ships `en` and `pt-BR`. In those two locales nothing visible changes. In any other
+locale, translate the three keys in your own locale file, or enable
+`config.i18n.fallbacks`; otherwise Rails shows its "translation missing" text where
+0.4.0 showed English. Any key can be overridden at any level of Active Model's lookup
+(`activerecord.errors.models.<model>.attributes.<attribute>.<key>` and so on).
+
+`errors.details` also changed: it carries the symbols `:cross_tenant` and
+`:last_owner` instead of the English String (the slug-format error keeps `:invalid`).
+Code that compared `details` to the old string, or a spec that does
+(`errors.added?(:parent, "belongs to a different tenant")` still works in `en`),
+needs the symbol. Exception messages stay English.
+
+### Adopting declarations and the audit
+
+New in v0.5.0 and **opt-in to run**: nothing raises at boot, and the audit only
+runs when you call it. Every model is either tenant-scoped or global, and "global
+because we forgot" is the failure the audit exists to catch.
+
+1. Declare every model that is not scoped, with a reason:
+
+   ```ruby
+   class Country < ApplicationRecord
+     tenant_global because: "reference data shared by every tenant"
+   end
+   ```
+
+   Scoped models keep `belongs_to_tenant` (optionally `tag: :billing`). A global
+   table that deliberately carries the tenant column (a record looked up before a
+   tenant is current) passes `allow_tenant_fk: true`.
+2. Run the audit in your suite, and in CI:
+
+   ```ruby
+   it "declares the tenancy of every model" do
+     expect(TenancyDable.audit).to be_empty
+   end
+   ```
+
+   ```bash
+   bin/rails tenancy_dable:audit   # exits 1, one finding per line, on stderr
+   ```
+
+3. Triage the findings. `:undeclared` wants a declaration. `:global_with_tenant_fk`
+   means a global model has a tenant column: scope it, or pass `allow_tenant_fk:
+   true`. `:scoped_without_index` wants an index that leads with the tenant column.
+4. Models you do not own (a library's, inheriting `ActiveRecord::Base`) go in
+   configuration with the reason in one place; whole engines go in the namespace list.
+
+   ```ruby
+   config.audit_allowed = {"SomeGem::Record" => "reviewed: holds no tenant data"}
+   config.audit_ignored_namespaces += %w[SomeEngine]
+   ```
+
+   Active Storage, Action Text, Action Mailbox and the Solid* tables are ignored by
+   default.
+
+To make `without_tenant` accountable, set `config.require_bypass_reason = true` and
+add a `reason:` to each call; subscribe to `"without_tenant.tenancy_dable"` to log
+where bypasses begin (README).
+
 ---
 
 ## See also
