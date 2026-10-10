@@ -62,6 +62,13 @@ module TenancyDable
           # No current tenant + require_tenant falsey → nil → unscoped (fail-open default).
         end
 
+        # Create refusal (§16.2): a new record whose fk names a tenant other than
+        # the current one raises. Prepended so it runs before every validator
+        # (a uniqueness check would otherwise read first and raise the read
+        # error); the `before_create` twin covers `save(validate: false)`.
+        before_validation(on: :create, prepend: true) { tenancy_refuse_foreign_tenant!(fk) }
+        before_create(prepend: true) { tenancy_refuse_foreign_tenant!(fk) }
+
         # Auto-assign the fk from the current tenant on create when blank. Uses
         # `[]=` (write_attribute), bypassing the immutability writer below — and
         # the record is not yet persisted anyway, so the guard would not fire.
@@ -131,6 +138,20 @@ module TenancyDable
         fk = TenancyDable.configuration.tenant_fk
         validates_uniqueness_of(*attr_names, scope: ([fk] + caller_scope).uniq, **options)
       end
+    end
+
+    private
+
+    # The create-refusal rule (§16.2, FROZEN). Ids only in the message (invariant 6).
+    def tenancy_refuse_foreign_tenant!(fk)
+      return if self[fk].blank? # blank: the auto-assign decides
+      return if TenancyDable::Current.tenant_scope_disabled # without_tenant
+      return unless (active_tenant = TenancyDable.current_tenant)
+      return if self[fk].to_s == active_tenant.id.to_s
+
+      raise TenancyDable::CrossTenantWriteError,
+        "refusing to create #{self.class.name} in tenant ##{self[fk]} while acting in " \
+        "tenant ##{active_tenant.id}; enter the tenant with TenancyDable.with_tenant"
     end
   end
 end

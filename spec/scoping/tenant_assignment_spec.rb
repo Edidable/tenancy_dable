@@ -16,8 +16,19 @@ RSpec.describe "TenancyDable::Scoped — tenant_id assignment" do
       expect(widget.tenant_id).to eq(tenant_a.id)
     end
 
-    it "does not override an explicitly provided tenant_id" do
-      widget = TenancyDable.with_tenant(tenant_a) { create(:widget, tenant: tenant_b) }
+    it "refuses an explicitly provided tenant_id of another tenant (§16.2)" do
+      expect { TenancyDable.with_tenant(tenant_a) { create(:widget, tenant: tenant_b) } }
+        .to raise_error(TenancyDable::CrossTenantWriteError)
+    end
+
+    it "accepts an explicitly provided tenant_id that is the current tenant" do
+      widget = TenancyDable.with_tenant(tenant_a) { create(:widget, tenant: tenant_a) }
+
+      expect(widget.tenant_id).to eq(tenant_a.id)
+    end
+
+    it "accepts an explicitly provided tenant_id when there is no current tenant" do
+      widget = create(:widget, tenant: tenant_b)
 
       expect(widget.tenant_id).to eq(tenant_b.id)
     end
