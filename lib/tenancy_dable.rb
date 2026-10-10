@@ -1,9 +1,12 @@
 # frozen_string_literal: true
 
+require "active_support/notifications"
 require "tenancy_dable/version"
 require "tenancy_dable/errors"
 require "tenancy_dable/configuration"
 require "tenancy_dable/current"
+require "tenancy_dable/snapshot"
+require "tenancy_dable/audit"
 require "tenancy_dable/policy/context"
 require "tenancy_dable/policy/base"
 require "tenancy_dable/railtie"
@@ -24,6 +27,18 @@ require "tenancy_dable/railtie"
 # context. The scoping engine, identity concerns, resolution, and authorization
 # layers are mixed in by the railtie as later phases land (see .midgal/PLAN.md).
 module TenancyDable
+  # Instrumented by `without_tenant` (§16.5).
+  WITHOUT_TENANT_EVENT = "without_tenant.tenancy_dable"
+
+  # The directory `call_site` skips (§16.5): frames inside the gem are not the
+  # caller of `without_tenant`.
+  LIB_DIR = "#{File.expand_path(__dir__)}/"
+  private_constant :LIB_DIR
+
+  UNSAFE_ISOLATION_MESSAGE = "tenant state written under a fiber scheduler with thread isolation; " \
+    "set config.active_support.isolation_level = :fiber"
+  private_constant :UNSAFE_ISOLATION_MESSAGE
+
   class << self
     # --- configuration -----------------------------------------------------
 
@@ -60,6 +75,7 @@ module TenancyDable
     # Assigning the same tenant, or setting from/to nil, is a normal
     # establish/clear and is never treated as an override.
     def current_tenant=(tenant)
+      check_isolation!
       previous = Current.tenant
       audit_override(previous, tenant)
       Current.tenant = tenant
@@ -82,6 +98,7 @@ module TenancyDable
     end
 
     def current_membership=(membership)
+      check_isolation!
       Current.membership = membership
     end
 
@@ -104,12 +121,60 @@ module TenancyDable
     # Run a block with tenant scoping disabled (scoped models return `all`),
     # restoring the prior flag afterwards (nesting-safe). Returns the block's
     # value. Does not touch the tenant itself, so no audit/RLS hook fires.
-    def without_tenant
-      previous = Current.tenant_scope_disabled
-      Current.tenant_scope_disabled = true
-      yield
-    ensure
-      Current.tenant_scope_disabled = previous
+    #
+    # Order (§16.5): the reason check, the isolation check, the event, then the
+    # flag. The event carries the host's reason, the tenant id and the call site,
+    # never a record (invariant 6).
+    def without_tenant(reason: nil)
+      unless reason.nil? || reason.is_a?(String) || reason.is_a?(Symbol)
+        raise BypassReasonError,
+          "without_tenant reason: must be a String or a Symbol, got #{reason.class}"
+      end
+
+      if configuration.require_bypass_reason && (reason.nil? || reason.to_s.strip.empty?)
+        raise BypassReasonError,
+          "without_tenant requires a non-blank reason: (config.require_bypass_reason is on)"
+      end
+
+      check_isolation!
+      notifier = ActiveSupport::Notifications.notifier
+      if notifier.listening?(WITHOUT_TENANT_EVENT)
+        # No block on purpose: with one, a raising block would add its exception
+        # (which can carry a record) to the payload.
+        ActiveSupport::Notifications.instrument(
+          WITHOUT_TENANT_EVENT,
+          reason: reason,
+          tenant_id: Current.tenant&.id,
+          call_site: call_site
+        )
+      end
+
+      scope_disabled_as(true, check: false) { yield }
+    end
+
+    # --- context carrier and audit (v0.5.0; §16.3/§16.4) -------------------
+
+    # The raw tenant state of this thread or fiber, to restore on another.
+    def snapshot
+      Snapshot.new(
+        tenant: Current.tenant,
+        membership: Current.membership,
+        tenant_scope_disabled: Current.tenant_scope_disabled
+      )
+    end
+
+    # A lambda running the block inside the snapshot taken NOW:
+    # `Thread.new(&TenancyDable.carry { work })`.
+    def carry(&block)
+      raise LocalJumpError, "no block given (yield)" unless block
+
+      captured = snapshot
+      ->(*args, **kwargs) { captured.restore { block.call(*args, **kwargs) } }
+    end
+
+    # Findings for models whose tenancy is undeclared or suspicious (§16.3).
+    def audit(models = nil)
+      Audit.run(models)
     end
 
     # --- authorization builder (additive, introduced Phase 06; §6) ---------
@@ -124,6 +189,40 @@ module TenancyDable
     end
 
     private
+
+    # Sets the bypass flag for the block and restores the prior one in `ensure`.
+    # The only writer of `tenant_scope_disabled` (§16.4); `without_tenant` has
+    # already run the isolation check before its event, so it passes `check: false`.
+    def scope_disabled_as(value, check: true)
+      check_isolation! if check
+      previous = Current.tenant_scope_disabled
+      begin
+        Current.tenant_scope_disabled = value
+        yield
+      ensure
+        Current.tenant_scope_disabled = previous
+      end
+    end
+
+    # Isolation check (§16.4): runs first in every gem write to `Current`. Under a
+    # fiber scheduler with thread isolation every fiber on the thread shares one
+    # `Current`, a live cross-request leak.
+    def check_isolation!
+      mode = configuration.isolation_check
+      return if mode == :off
+      return unless Fiber.scheduler
+      return unless ActiveSupport::IsolatedExecutionState.isolation_level == :thread
+
+      raise UnsafeIsolationError, UNSAFE_ISOLATION_MESSAGE unless mode == :warn
+
+      logger&.warn("[TenancyDable] #{UNSAFE_ISOLATION_MESSAGE}")
+    end
+
+    # `"path:lineno"` of the first caller outside the gem, or nil (§16.5).
+    def call_site
+      location = caller_locations(1).find { |loc| !(loc.absolute_path || loc.path).to_s.start_with?(LIB_DIR) }
+      location && "#{location.absolute_path || location.path}:#{location.lineno}"
+    end
 
     # Audit policy for a `current_tenant=` reassignment (§4.2). Only a switch
     # between two DIFFERENT, non-nil tenants counts as an override; setting from

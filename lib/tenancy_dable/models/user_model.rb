@@ -16,6 +16,8 @@ module TenancyDable
     extend ActiveSupport::Concern
 
     included do
+      tenant_global because: "a user spans tenants through memberships"
+
       has_many :memberships,
         class_name: TenancyDable.configuration.membership_model,
         dependent: :destroy

@@ -100,6 +100,18 @@ RSpec.describe "Integration: ActiveJob tenant propagation" do
     expect(IntegrationTenantProbeJob.observed_tenant_id).to be_nil
   end
 
+  it "raises TenantNotFoundError when the enqueue-time tenant no longer resolves (§16.2)" do
+    payload = TenancyDable.with_tenant(tenant_a) { IntegrationTenantProbeJob.new.serialize }
+    create(:widget, tenant: tenant_b)
+    Tenant.where(id: tenant_a.id).delete_all
+
+    expect { ActiveJob::Base.execute(payload) }
+      .to raise_error(TenancyDable::TenantNotFoundError, "IntegrationTenantProbeJob was enqueued in tenant ##{tenant_a.id}, " \
+        "which no longer resolves; refusing to run it with no tenant")
+    expect(IntegrationTenantProbeJob.observed_widget_ids).to be_nil
+    expect(TenancyDable.current_tenant).to be_nil
+  end
+
   it "carries the tenant through the realistic perform_later enqueue path" do
     TenancyDable.with_tenant(tenant_a) { IntegrationTenantProbeJob.perform_later }
 

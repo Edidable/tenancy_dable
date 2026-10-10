@@ -17,4 +17,14 @@ RSpec.describe TenancyDable do
       expect(TenancyDable.configuration).to be(TenancyDable.configuration)
     end
   end
+
+  describe "constants" do
+    it "names the without_tenant event" do
+      expect(TenancyDable::WITHOUT_TENANT_EVENT).to eq("without_tenant.tenancy_dable")
+    end
+
+    it "keeps the gem's directory out of the public constants" do
+      expect { TenancyDable::LIB_DIR }.to raise_error(NameError)
+    end
+  end
 end

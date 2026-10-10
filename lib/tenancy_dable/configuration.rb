@@ -28,6 +28,11 @@ module TenancyDable
     attr_accessor :require_tenant, :rls, :rls_statement, :audit_overrides,
       :on_tenant_not_found, :on_not_a_member, :current_user_resolver
 
+    # v0.5.0 (§16): the read guard, the declaration audit, the fiber isolation
+    # check, and the audited `without_tenant`.
+    attr_accessor :guard_reads, :audit_ignored_namespaces, :audit_allowed,
+      :isolation_check, :require_bypass_reason
+
     def initialize
       @tenant_model = "Tenant"
       @user_model = "User"
@@ -52,6 +57,12 @@ module TenancyDable
       # explicit so this resolves the HOST's top-level model, never
       # `TenancyDable::Current` (which has no `user`).
       @current_user_resolver = -> { (defined?(::Current) && ::Current.respond_to?(:user)) ? ::Current.user : nil }
+      # v0.5.0 (§16). A new, unfrozen Array per Configuration so a host can `+=`.
+      @guard_reads = true
+      @audit_ignored_namespaces = %w[ActiveStorage ActionText ActionMailbox SolidQueue SolidCache SolidCable]
+      @audit_allowed = {}
+      @isolation_check = :raise
+      @require_bypass_reason = false
     end
 
     # --- resolver helpers (internal conveniences) --------------------------
@@ -103,7 +114,38 @@ module TenancyDable
           "on_not_a_member #{on_not_a_member.inspect} must be :not_a_member_error, :not_authorized, or a callable"
       end
 
+      validate_v050!
+
       self
+    end
+
+    private
+
+    # The five v0.5.0 settings (§16.7).
+    def validate_v050!
+      {guard_reads: guard_reads, require_bypass_reason: require_bypass_reason}.each do |setting, value|
+        unless [true, false].include?(value)
+          raise ConfigurationError, "#{setting} must be true or false"
+        end
+      end
+
+      unless %i[raise warn off].include?(isolation_check)
+        raise ConfigurationError, "isolation_check #{isolation_check.inspect} must be :raise, :warn, or :off"
+      end
+
+      unless audit_ignored_namespaces.is_a?(Array) && audit_ignored_namespaces.all? { |ns| named?(ns, Symbol) }
+        raise ConfigurationError, "audit_ignored_namespaces must be an Array of non-blank Strings or Symbols"
+      end
+
+      unless audit_allowed.is_a?(Hash) && audit_allowed.all? { |name, reason| named?(name) && named?(reason) }
+        raise ConfigurationError,
+          "audit_allowed must be a Hash of non-blank String model names to non-blank String reasons"
+      end
+    end
+
+    # A non-blank String (or an instance of one of the `extra` classes).
+    def named?(value, *extra)
+      (value.is_a?(String) || extra.any? { |klass| value.is_a?(klass) }) && !value.to_s.strip.empty?
     end
   end
 end

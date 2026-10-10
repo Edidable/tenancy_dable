@@ -20,7 +20,7 @@ Four layers, one dependency:
 
 | Layer | What you get |
 |---|---|
-| **Row-scoping engine** | `belongs_to_tenant` scoping, **fail-closed when configured** (`require_tenant`), immutable `tenant_id`, a bulk-write guard on `update_all`/`delete_all`/`destroy_all`, opt-in ActiveJob tenant propagation, and an optional **Postgres RLS** hook |
+| **Row-scoping engine** | `belongs_to_tenant` scoping, **fail-closed when configured** (`require_tenant`), immutable `tenant_id`, a read guard and a bulk-write guard, a refusal to create into another tenant, declared tenancy with an audit, fiber-safe context, opt-in ActiveJob tenant propagation, and an optional **Postgres RLS** hook |
 | **Identity model** | global `User` ↔ `Membership` (role) ↔ `Tenant`; roles `owner`/`admin`/`member`; generated role predicates; last-owner guard |
 | **Resolution** | `/:tenant_slug` → tenant + **membership enforcement** (the piece `acts_as_tenant` / `rails-tenantify` don't ship) |
 | **Authorization** | a Pundit `Context` (user + tenant + membership) and a secure-by-default base policy with `same_tenant?` / `owner?` / `manager?` / `member?` and a fail-closed scope |
@@ -94,6 +94,11 @@ end
 | `audit_overrides` | `:log` | Behaviour when `current_tenant` is reassigned to a **different** tenant mid-request: `:log` (tenant ids only — never payloads), `:raise` (`TenantOverrideError`), or `:ignore`. |
 | `on_tenant_not_found` | `:raise` | When a slug matches no tenant: `:raise` (`ActiveRecord::RecordNotFound`) or `:null` (proceed with no tenant in context). |
 | `on_not_a_member` | `:not_a_member_error` | When the acting user is authenticated but **not** a member of the resolved tenant: `:not_a_member_error` (raise `NotAMemberError` — default, today's behavior) / `:not_authorized` (raise `Pundit::NotAuthorizedError`, required lazily — reuse an existing `rescue_from Pundit::NotAuthorizedError`) / a callable `->(tenant)` run with `instance_exec` in the controller (redirect, `head :forbidden`, raise your own). Membership stays required in every mode. |
+| `guard_reads` | `true` | Raise `CrossTenantReadError` on a scoped read pinned to another tenant or with its tenant filter removed. `false` restores the 0.4.0 read behaviour. |
+| `isolation_check` | `:raise` | Under a fiber scheduler with thread isolation, a tenant write raises `UnsafeIsolationError` (`:raise`), logs (`:warn`) or is not checked (`:off`). |
+| `require_bypass_reason` | `false` | When true, `without_tenant` without a non-blank `reason:` raises `BypassReasonError`. |
+| `audit_allowed` | `{}` | Model name => reason, for reviewed models you do not own; `TenancyDable.audit` skips them. |
+| `audit_ignored_namespaces` | `%w[ActiveStorage ActionText ActionMailbox SolidQueue SolidCache SolidCable]` | Namespaces `TenancyDable.audit` skips. Append with `+=`. |
 | `current_user_resolver` | `-> { (defined?(::Current) && ::Current.respond_to?(:user)) ? ::Current.user : nil }` | How resolution finds the acting user (auth-agnostic). Run with `instance_exec` in the controller, so `-> { current_user }` works for Devise. |
 
 > **Default is fail-OPEN.** As shipped, a scoped query with no active tenant returns `all`. Set `require_tenant = true` (or a per-query callable) to make those queries raise instead. The web request path is always scoped because [resolution](#3-slug-resolution) establishes a tenant before your action runs; `require_tenant` is the backstop for jobs, consoles, and rake tasks.
@@ -131,6 +136,7 @@ TenancyDable.without_tenant { Invoice.update_all(state: "void") }  # explicit by
 - **`tenant_id` is immutable** after create (assignment-writer *and* `before_update` backstop).
 - **Bulk writes are guarded.** `update_all` / `delete_all` / `destroy_all` raise `BulkWriteError` unless the relation is provably pinned to the current tenant; wrap in `TenancyDable.without_tenant { … }` to override.
 - **Cross-tenant `belongs_to` is rejected** at validation: a scoped association pointing at another tenant's row adds a "belongs to a different tenant" error.
+- **Reads are guarded too** ([below](#the-read-guard)), and **writing into another tenant's rows is refused** ([below](#writing-into-another-tenants-rows-is-refused)).
 
 Context helpers on the `TenancyDable` facade:
 
@@ -138,10 +144,134 @@ Context helpers on the `TenancyDable` facade:
 TenancyDable.current_tenant            # => the active workspace (or nil)
 TenancyDable.current_tenant = workspace
 TenancyDable.with_tenant(workspace) { … }  # set for the block, restore after (nesting-safe; returns block value)
-TenancyDable.without_tenant { … }          # disable scoping for the block
+TenancyDable.without_tenant(reason: "nightly report") { … }  # disable scoping for the block; the reason is optional
 TenancyDable.current_membership        # => the acting membership, or nil when it is not the current tenant's
 TenancyDable.foreign_membership?       # => true when a membership is set but is not the current tenant's
 ```
+
+#### The read guard
+
+An association's relation (`other_tenant.widgets`) replaces the default scope's tenant filter with the owner's, so without a guard a read through it returns another tenant's rows while you act in yours. While a tenant is current, a read on a scoped model whose tenant filter points at a **different** tenant, or has been **removed**, raises `TenancyDable::CrossTenantReadError`:
+
+```ruby
+TenancyDable.with_tenant(b) do
+  a.widgets.to_a                          # => raises CrossTenantReadError (also .count, .pluck, .exists?, a.widget_ids, a has_one)
+  a.widgets.destroy_all                   # => raises; nothing is deleted
+  Widget.where(tenant_id: a.id)           # .to_a raises; so does an IN list across tenants
+  Widget.unscope(where: :tenant_id).to_a  # raises (also rewhere, merge, and an `or` with another tenant's relation)
+  Widget.invert_where.to_a                # raises (so does unscoped.where.not(tenant_id: ...), a range, a subquery on the tenant column)
+  b.widgets.to_a                          # fine: the current tenant
+end
+
+TenancyDable.with_tenant(a) { a.widgets.to_a }                                  # enter the tenant
+TenancyDable.without_tenant(reason: "usage report") { Widget.where(tenant_id: [a.id, b.id]).count }  # or bypass on purpose
+```
+
+`config.guard_reads = false` turns it off. It never applies inside `without_tenant` or with no current tenant at the moment of the read (the default scope decides there). It also covers the less obvious shapes:
+
+- a tenant predicate that is not an equality: `invert_where`, `where.not(tenant_id: ...)`, a range, or a subquery on the tenant column, including one brought in through `merge` or `unscoped`;
+- a relation **built** with no tenant current (or inside `without_tenant`) and **loaded** inside a tenant: it is refused, unless it is pinned to the current tenant;
+- `cache_key`, `cache_version` and `cache_key_with_version` on a refused relation, which read the other tenant's rows;
+- a refused relation compiled into a subquery, `from` or `with` of another model. Side effect: `to_sql` and `arel` on a refused relation raise too.
+
+`update_all(tenant_id: ...)` (a Hash with the tenant column among its keys) raises `TenancyDable::TenantImmutableError`, except inside `without_tenant`.
+
+The guard targets the shapes Active Record produces on its own, and its **documented residuals** are explicit relation surgery:
+
+- `Widget.unscoped` (and `unscoped { }`) with **no** tenant predicate, the Active Record bypass the guard must keep working. `Widget.unscoped.where(tenant_id: other.id)` is refused like any other pin;
+- `except(:where)`, `only(...)`, and an `or` with an unscoped relation or with a stale one (`Widget.where.not(name: nil).or(stale)`, where `stale` was built before the tenant was entered: Active Record's `or` keeps only the predicates both sides share, so the tenant pin is dropped);
+- SQL-string predicates, such as `where("tenant_id = ?", x)`, and SQL-string `update_all`;
+- raw SQL strings: `find_by_sql`, `connection.select_all` with a String (a relation passed to `select_all` is refused);
+- `reload` by id, and the cache key of an association that is already loaded (no query runs, so nothing is read that was not already in memory).
+
+A global `validates :code, uniqueness: true` on a scoped model builds on `unscoped`, so it reveals whether another tenant holds a value. That is a host choice, not guarded; use `validates_uniqueness_to_tenant` to scope it.
+
+#### Writing into another tenant's rows is refused
+
+While a tenant is current, writing to another tenant's rows raises `TenancyDable::CrossTenantWriteError`, with or without validators and under `save(validate: false)`. That covers creating a scoped record with another tenant's id, and updating, destroying, touching, `update_columns` and `delete` of a record that belongs to another tenant (`valid?` on such a record raises as well). A blank tenant id on a new record still takes the current tenant, and an id equal to the current tenant is accepted.
+
+```ruby
+TenancyDable.with_tenant(b) do
+  Widget.create!(tenant_id: a.id)   # => raises CrossTenantWriteError
+  a_widget.update!(name: "x")       # => raises (a_widget belongs to tenant a)
+  a.widgets.insert_all([{name: "x"}])  # => raises; so do upsert_all and insert_all!
+end
+TenancyDable.with_tenant(a) { Widget.create!(name: "ok") }  # enter the target tenant instead
+TenancyDable.with_tenant(a_widget.tenant) { a_widget.update!(name: "x") }
+```
+
+`insert_all`, `insert_all!`, `upsert_all` and their singular forms are checked per row. An **upsert** is also refused when its conflict target does not include the tenant column, because it could overwrite another tenant's row: that includes the primary key and, on an adapter without conflict targets such as MySQL, every upsert on a scoped model inside a tenant. The fix is a unique index that includes the tenant column (and `unique_by:` naming it), `with_tenant(record.tenant) { ... }`, or `without_tenant(reason: "...") { ... }`.
+
+`update_columns(tenant_id: ...)` and `update_column(:tenant_id, ...)` with a different id raise `TenantImmutableError`, like the writer.
+
+#### Declaring tenancy and auditing it
+
+Every model is tenant-scoped or global, and the gem makes you say which. `belongs_to_tenant` declares a model scoped; `tenant_global` (available on every Active Record class) declares one global, with a reason. A model declares once; a subclass inherits, and a second declaration raises `ConfigurationError`.
+
+```ruby
+class Country < ApplicationRecord
+  tenant_global because: "reference data shared by every tenant"
+end
+
+class Invoice < ApplicationRecord
+  include TenancyDable::Scoped
+  belongs_to_tenant tag: :billing   # tag: is free-form
+end
+```
+
+`tenant_global` also takes `tag:` and `allow_tenant_fk: true` (for a deliberately unscoped table that carries the tenant column). `TenantModel`, `UserModel` and `MembershipModel` declare themselves. `TenancyDable.audit` then proves nothing was forgotten:
+
+```ruby
+expect(TenancyDable.audit).to be_empty   # in a spec
+```
+
+```bash
+bin/rails tenancy_dable:audit            # in CI: one finding per line on stderr, exit 1 on findings
+```
+
+Findings are `:undeclared` (no declaration), `:global_with_tenant_fk` (declared global but has the tenant column) and `:scoped_without_index` (no index leads with the tenant column); each responds to `model`, `kind` and `message`. A global model that shares a scoped model's table is reported as `:global_with_tenant_fk` even with `allow_tenant_fk: true`. Abstract classes, real STI subclasses (same table as the base class) and the namespaces in `audit_ignored_namespaces` are skipped, and `audit_allowed` records a reviewed model you do not own.
+
+#### Fiber safety
+
+`Current` is isolated per thread by default. Under a fiber scheduler (a fiber-per-request server, anything on `async`) every fiber on a thread would share it, so a tenant-state write there raises `TenancyDable::UnsafeIsolationError` until you set `config.active_support.isolation_level = :fiber` (`config.isolation_check = :warn` or `:off` relaxes it). Puma, Sidekiq and rake never run a scheduler, so they are unaffected, unless your own code opens an `Async { }` or `Sync { }` reactor inside them: that sets the scheduler for the thread and the check fires under thread isolation.
+
+Work handed to another thread or fiber starts with no tenant. With `require_tenant` on, a scoped read there raises (fail closed). With it **off** (the default), a thread or fiber that lost the context reads **every** tenant, which is the fail-open default. A host that spawns threads or uses fibers should set `require_tenant = true` and carry the context across on purpose:
+
+```ruby
+Thread.new(&TenancyDable.carry { Report.build })      # carry returns a lambda that runs the block in the context taken NOW
+
+snapshot = TenancyDable.snapshot                      # tenant, membership and the without_tenant flag
+executor.post { snapshot.restore { Report.build } }   # restored for the block, then put back
+```
+
+#### Auditing `without_tenant`
+
+`without_tenant` takes an optional `reason:`. When something subscribes to `"without_tenant.tenancy_dable"`, each call publishes `reason`, `tenant_id` and `call_site` (an absolute path, `"/srv/app/app/jobs/sweep.rb:12"`), never a record:
+
+```ruby
+ActiveSupport::Notifications.subscribe(TenancyDable::WITHOUT_TENANT_EVENT) do |*, payload|
+  Rails.logger.info("tenant bypass: #{payload[:reason]} at #{payload[:call_site]}")
+end
+```
+
+`config.require_bypass_reason = true` makes a call without a reason raise `BypassReasonError`. `reason:` accepts only `nil`, a String or a Symbol; anything else raises `BypassReasonError`, so a record can never reach the event payload.
+
+Write tenant state only through the facade (`TenancyDable.current_tenant=`, `with_tenant`, `without_tenant`): `Current.set` and `Current.tenant=` skip the isolation check, the audit and the RLS hook.
+
+#### Localizing messages
+
+The gem's three validation messages are I18n keys under `errors.messages`: `cross_tenant`, `last_owner` and `slug_format`. It ships `en` and `pt-BR`. `en` always loads; `pt-BR` loads only when the host declares it in `config.i18n.default_locale` or `config.i18n.available_locales` in `config/application.rb` (not in an initializer, which runs too late), so an English-only host's `I18n.available_locales` does not gain `pt-BR`. The host's own locale files win over the gem's for the same key, however the host registers them (`config/locales`, `config.i18n.load_path`, or a direct `I18n.load_path <<`). A `pt-BR` host that sets its locale only in `config/initializers` gets no `pt-BR` file and sees `Translation missing: pt-BR.errors.messages.cross_tenant`; declare the locale in `config/application.rb`. For any other locale, translate the keys, or enable fallbacks that reach `:en` (`config.i18n.fallbacks = [:en]`; plain `fallbacks = true` falls back to your default locale only), or override them at any level of Active Model's lookup:
+
+```yaml
+es:
+  errors:
+    messages:
+      cross_tenant: "pertenece a otro inquilino"
+      last_owner: "no se puede cambiar: debe quedar al menos un propietario"
+      slug_format: "solo minúsculas, números y guiones simples"
+```
+
+`errors.details` carries the symbols (`:cross_tenant`, `:last_owner`). Exception messages stay English.
 
 ### 2. Identity model
 
@@ -268,7 +398,7 @@ end
 # restored — reads scope, bulk writes pass the guard, the role is known, exactly as inline.
 ```
 
-Fail-open by design: a job enqueued with no current tenant performs untouched; if the tenant (or membership) was deleted before the job runs, that record reloads to nil — `perform` runs under `with_tenant(nil)` with a nil membership. **Backward compatible:** a payload enqueued before v0.3.0 carries no membership key, so it restores a nil membership; tenant propagation is byte-for-byte unchanged.
+Fail-open by design: a job enqueued with no current tenant performs untouched. If the tenant was deleted before the job runs, `perform` raises `TenancyDable::TenantNotFoundError` instead of running with no tenant (a host can `discard_on TenancyDable::TenantNotFoundError`); a deleted membership reloads to nil. **Backward compatible:** a payload enqueued before v0.3.0 carries no membership key, so it restores a nil membership; tenant propagation is byte-for-byte unchanged.
 
 ## Opt-in: Action Cable tenant resolution
 
@@ -333,24 +463,29 @@ Every error subclasses `TenancyDable::Error`, so a host can `rescue TenancyDable
 | Error | Raised when |
 |---|---|
 | `NoTenantError` | fail-closed: scoped query with `require_tenant` active and no current tenant |
-| `TenantImmutableError` | reassigning a persisted record's tenant fk |
+| `TenantImmutableError` | reassigning a persisted record's tenant fk (writer, `update_columns`, or `update_all` with the fk among its keys) |
 | `BulkWriteError` | guarded `update_all`/`delete_all`/`destroy_all` without a valid current-tenant scope |
-| `CrossTenantError` | reserved for the cross-tenant `belongs_to` message style |
+| `CrossTenantError` | reserved for the cross-tenant `belongs_to` message style (its `MESSAGE` equals the `en` default of `cross_tenant`) |
 | `NotAMemberError` | the resolved acting user is not a member of the resolved tenant |
-| `TenantNotFoundError` | reserved for host / non-bang `find_by` resolution strategies (the `:raise` path itself raises `ActiveRecord::RecordNotFound`) |
+| `TenantNotFoundError` | a `TenancyDable::Job` whose enqueue-time tenant no longer resolves (also reserved for host / non-bang `find_by` resolution strategies; the `:raise` path itself raises `ActiveRecord::RecordNotFound`) |
 | `TenantOverrideError` | `current_tenant` reassigned to a different tenant while `audit_overrides == :raise` |
-| `ConfigurationError` | invalid configuration |
+| `CrossTenantReadError` | a scoped read pinned to another tenant, or with its tenant filter removed, while a tenant is current |
+| `CrossTenantWriteError` | creating, updating, destroying, touching or deleting another tenant's record, or an `insert_all` / upsert that could reach one, while a tenant is current |
+| `UnsafeIsolationError` | tenant state written under a fiber scheduler with thread isolation (`isolation_check == :raise`) |
+| `BypassReasonError` | `without_tenant` without a reason while `require_bypass_reason` is on, or with a `reason:` that is not nil, a String or a Symbol |
+| `ConfigurationError` | invalid configuration, or an invalid or repeated tenancy declaration |
 
 ## Security invariants
 
 The boundary this gem owns, in one place (each is proven by a spec; see [DESIGN.md §11](DESIGN.md)):
 
 1. **Fail-closed when configured** — `require_tenant` active + no tenant ⇒ raise, never a silent `all`.
-2. **No cross-tenant read path** — filter by tenant before ordering; bulk-writes guarded; resolution enforces membership.
+2. **No cross-tenant read path** — filter by tenant before ordering; a read pinned to another tenant, or with its filter removed, raises; bulk writes guarded; a write into another tenant's rows raises; resolution enforces membership (within the [documented residuals](#the-read-guard)).
 3. **`tenant_id` immutable** after create.
 4. **Pundit scope fails closed** — `scope.none` with no active tenant.
 5. **Slug-only resolution** — never trust a tenant id from the URL.
-6. **No PII/secret leakage** — audit logs carry tenant ids only, never payloads.
+6. **No PII/secret leakage** — audit logs and the `without_tenant` event carry tenant ids (and the host's reason), never payloads.
+7. **No shared tenant state across fibers** — under a fiber scheduler with thread isolation, a tenant write raises.
 
 ## Development
 

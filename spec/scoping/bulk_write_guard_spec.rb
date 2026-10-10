@@ -59,6 +59,34 @@ RSpec.describe "TenancyDable::RelationExtension — bulk-write guard" do
     end
   end
 
+  context "with the tenant filter removed or widened (shared classifier, §16.1)" do
+    it "refuses a bulk write after unscope(where: :tenant_id)" do
+      create(:widget, tenant: tenant_b)
+      TenancyDable.current_tenant = tenant_a
+
+      expect { Widget.unscope(where: :tenant_id).delete_all }
+        .to raise_error(TenancyDable::BulkWriteError)
+      expect(Widget.unscoped.count).to eq(1)
+    end
+
+    it "refuses a bulk write on a multi-tenant IN list that contains the current tenant" do
+      create(:widget, tenant: tenant_b)
+      TenancyDable.current_tenant = tenant_a
+
+      expect { Widget.where(tenant_id: [tenant_a.id, tenant_b.id]).delete_all }
+        .to raise_error(TenancyDable::BulkWriteError)
+      expect(Widget.unscoped.count).to eq(1)
+    end
+
+    it "allows a bulk write after rewhere(tenant_id: current)" do
+      mine = create(:widget, tenant: tenant_a)
+      TenancyDable.current_tenant = tenant_a
+
+      expect { Widget.rewhere(tenant_id: tenant_a.id).update_all(name: "renamed") }.not_to raise_error
+      expect(mine.reload.name).to eq("renamed")
+    end
+  end
+
   context "inside without_tenant" do
     it "allows an otherwise-guarded bulk write across all tenants" do
       create(:widget, tenant: tenant_a)
@@ -72,6 +100,43 @@ RSpec.describe "TenancyDable::RelationExtension — bulk-write guard" do
     end
   end
 
+  context "update_all that rewrites the tenant fk (invariant 3)" do
+    let!(:mine) { create(:widget, tenant: tenant_b, name: "B-1") }
+
+    def tenant_of(record)
+      TenancyDable.without_tenant { Widget.find(record.id).tenant_id }
+    end
+
+    it "raises TenantImmutableError for a Symbol key and moves nothing" do
+      expect { TenancyDable.with_tenant(tenant_b) { Widget.where(id: mine.id).update_all(tenant_id: tenant_a.id) } }
+        .to raise_error(TenancyDable::TenantImmutableError, /Widget#tenant_id is immutable/)
+      expect(tenant_of(mine)).to eq(tenant_b.id)
+    end
+
+    it "raises TenantImmutableError for a String key" do
+      expect { TenancyDable.with_tenant(tenant_b) { Widget.update_all("tenant_id" => tenant_a.id) } }
+        .to raise_error(TenancyDable::TenantImmutableError)
+      expect(tenant_of(mine)).to eq(tenant_b.id)
+    end
+
+    it "raises even when the value is the current tenant's own id" do
+      expect { TenancyDable.with_tenant(tenant_b) { Widget.update_all(tenant_id: tenant_b.id) } }
+        .to raise_error(TenancyDable::TenantImmutableError)
+    end
+
+    it "allows the rewrite inside without_tenant" do
+      TenancyDable.with_tenant(tenant_b) do
+        TenancyDable.without_tenant { Widget.where(id: mine.id).update_all(tenant_id: tenant_a.id) }
+      end
+      expect(tenant_of(mine)).to eq(tenant_a.id)
+    end
+
+    it "allows an update_all on other columns" do
+      TenancyDable.with_tenant(tenant_b) { Widget.update_all(name: "renamed") }
+      expect(mine.reload.name).to eq("renamed")
+    end
+  end
+
   it "leaves non-tenant-scoped models untouched by the guard" do
     # Tenant is not tenant-scoped (it IS the tenant), so its bulk writes pass
     # straight through even with no current tenant.
@@ -80,5 +145,27 @@ RSpec.describe "TenancyDable::RelationExtension — bulk-write guard" do
     expect { Tenant.where(name: "Before").update_all(name: "After") }
       .not_to raise_error
     expect(Tenant.where(name: "After")).to be_present
+  end
+
+  describe "the classifier on literal pins" do
+    it "writes through where(tenant_id: [b, b]) and refuses a list holding another tenant" do
+      mine = create(:widget, tenant: tenant_b, name: "mine")
+      create(:widget, tenant: tenant_a, name: "theirs")
+
+      TenancyDable.with_tenant(tenant_b) { Widget.where(tenant_id: [tenant_b.id, tenant_b.id]).update_all(name: "renamed") }
+      expect(mine.reload.name).to eq("renamed")
+
+      expect { TenancyDable.with_tenant(tenant_b) { Widget.unscoped.where(tenant_id: [tenant_b.id, tenant_a.id]).delete_all } }
+        .to raise_error(TenancyDable::BulkWriteError)
+    end
+
+    it "refuses an Arel equality on the fk against a subquery" do
+      subquery = Tenant.where(id: tenant_a.id).select(:id).arel
+      create(:widget, tenant: tenant_a, name: "theirs")
+
+      expect { TenancyDable.with_tenant(tenant_b) { Widget.unscoped.where(Widget.arel_table[:tenant_id].eq(subquery)).delete_all } }
+        .to raise_error(TenancyDable::BulkWriteError)
+      expect(Widget.unscoped.where(name: "theirs").count).to eq(1)
+    end
   end
 end

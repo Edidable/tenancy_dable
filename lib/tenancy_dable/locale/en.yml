@@ -1,0 +1,6 @@
+en:
+  errors:
+    messages:
+      cross_tenant: "belongs to a different tenant"
+      last_owner: "cannot be changed: a tenant must keep at least one owner"
+      slug_format: "must be lowercase letters, numbers, and single hyphens"

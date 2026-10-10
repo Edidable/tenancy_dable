@@ -27,11 +27,47 @@ module TenancyDable
       TenancyDable::Railtie.install_action_controller!
     end
 
+    # The gem's own validation messages (§16.6). PREPENDED to `I18n.load_path`
+    # (a later file wins), so a host file for the same key wins however the host
+    # registered it: `config/locales` and `config.i18n.load_path` are added by
+    # `I18n::Railtie.initialize_i18n` after this, and a direct append in the
+    # application class body is already in the list.
+    # The initializer runs where the host's `config.i18n` is known, which is how
+    # `pt-BR` stays out of an English-only host's `I18n.available_locales`.
+    initializer "tenancy_dable.i18n" do |app|
+      files = TenancyDable::Railtie.locale_files(app.config.i18n)
+      ActiveSupport.on_load(:i18n) { TenancyDable::Railtie.prepend_load_path(files) }
+    end
+
+    rake_tasks do
+      load File.expand_path("tasks/audit.rake", __dir__)
+    end
+
+    # Put `files` first in `I18n.load_path`, moving them if already present. :nodoc:
+    def self.prepend_load_path(files)
+      I18n.load_path = files + (I18n.load_path - files)
+    end
+
+    # The gem's locale files for a host's `config.i18n` (§16.6): `en` always,
+    # `pt-BR` only when the host declares it in `default_locale` or
+    # `available_locales` (symbols or strings). :nodoc:
+    def self.locale_files(i18n_config)
+      dir = File.expand_path("locale", __dir__)
+      declared = [i18n_config[:default_locale], *i18n_config[:available_locales]].compact.map(&:to_s)
+      names = declared.include?("pt-BR") ? %w[en pt-BR] : %w[en]
+      names.map { |name| File.join(dir, "#{name}.yml") }
+    end
+
     # Wire the scoping engine into ActiveRecord (Phase 03) and make the identity
     # concerns (Phase 04) available. Loaded lazily here, on `:active_record`,
     # rather than from the entry file so the units that need AR only load once it
     # is present (DESIGN.md §2).
     def self.install_active_record!
+      # Declarations first (§16.3): the macro and readers reach every Active
+      # Record class, and the identity concerns below declare themselves on it.
+      require "tenancy_dable/declarations"
+      ActiveRecord::Base.extend(TenancyDable::Declarations)
+
       require "tenancy_dable/scoped"
       require "tenancy_dable/relation_extension"
 
@@ -47,6 +83,11 @@ module TenancyDable
       # destroy_all via `super`. `Scoped` becomes available for host models to
       # `include` simply by being required above.
       ActiveRecord::Relation.prepend(TenancyDable::RelationExtension)
+
+      # `insert_all` / `upsert_all` build an `InsertAll` and skip every callback,
+      # so the create refusal cannot see them (§16.2); guard its initialization.
+      require "tenancy_dable/insert_all_extension"
+      ActiveRecord::InsertAll.prepend(TenancyDable::InsertAllExtension)
     end
 
     # Wire the slug-resolution concern (Phase 05) into ActionController so host

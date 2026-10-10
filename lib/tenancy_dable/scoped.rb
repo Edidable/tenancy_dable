@@ -30,11 +30,13 @@ module TenancyDable
       # Declare this model tenant-scoped on the `name` association (default
       # `:tenant`), keyed by `config.tenant_fk` (default `:tenant_id`).
       #
-      # Installs, in order: the `belongs_to`, the `tenant_scoped?` class
+      # Installs, in order: the tenancy declaration (§16.3), the `belongs_to`, the `tenant_scoped?` class
       # predicate, the fail-closed default scope, create-time fk auto-assignment,
       # the post-create fk immutability guard, and the cross-tenant `belongs_to`
       # validation. See DESIGN.md §5.1 — the decision trees there are frozen.
-      def belongs_to_tenant(name = :tenant, **opts)
+      def belongs_to_tenant(name = :tenant, tag: nil, **opts)
+        tenancy_declare!(:scoped, tag: tag) # a re-declaration raises before anything is installed
+
         # Structural: bound once, at declaration time.
         fk = TenancyDable.configuration.tenant_fk
 
@@ -45,20 +47,30 @@ module TenancyDable
         # guard and the cross-tenant validation rely on.
         define_singleton_method(:tenant_scoped?) { true }
 
-        # Fail-closed default scope (invariant 1). Returning nil in the bypass /
-        # fail-open branches lets ActiveRecord fall back to the unscoped relation
-        # (`instance_exec(&scope) || default_scope`), so we never need `all`.
+        # Fail-closed default scope (invariant 1). The bypass / fail-open branches
+        # return the relation marked as built without a tenant (§16.1), so loading
+        # it later inside a tenant is refused rather than reading every tenant.
         default_scope do
           if TenancyDable::Current.tenant_scope_disabled
-            # `without_tenant` bypass — fall through to the unscoped relation.
+            extending(TenancyDable::BuiltWithoutTenant) # `without_tenant` bypass
           elsif (active_tenant = TenancyDable.current_tenant)
             where(fk => active_tenant.id) # filter before any ordering (invariant 2)
           elsif TenancyDable::Scoped.require_tenant_in_context?
             raise TenancyDable::NoTenantError,
               "#{klass.name} was queried with no current tenant while require_tenant is active"
+          else
+            extending(TenancyDable::BuiltWithoutTenant) # fail-open default
           end
-          # No current tenant + require_tenant falsey → nil → unscoped (fail-open default).
         end
+
+        # Foreign-tenant refusal (§16.2): a write whose record names a tenant other
+        # than the current one raises, for a new record (create) and for a
+        # persisted one in hand (update, destroy). Prepended so it runs before every
+        # validator (a uniqueness check would otherwise read first and raise the
+        # read error); `before_save` covers `save(validate: false)`.
+        before_validation(prepend: true) { tenancy_refuse_foreign_tenant!(fk, new_record? ? :create : :update) }
+        before_save(prepend: true) { tenancy_refuse_foreign_tenant!(fk, new_record? ? :create : :update) }
+        before_destroy(prepend: true) { tenancy_refuse_foreign_tenant!(fk, :destroy) }
 
         # Auto-assign the fk from the current tenant on create when blank. Uses
         # `[]=` (write_attribute), bypassing the immutability writer below — and
@@ -117,7 +129,7 @@ module TenancyDable
             target_tenant_id = assoc_klass.unscoped.where(id: assoc_id).pick(fk)
             next if target_tenant_id.nil? || target_tenant_id == self_tenant_id
 
-            errors.add(reflection.name, TenancyDable::CrossTenantError::MESSAGE)
+            errors.add(reflection.name, :cross_tenant)
           end
         end
       end
@@ -129,6 +141,68 @@ module TenancyDable
         fk = TenancyDable.configuration.tenant_fk
         validates_uniqueness_of(*attr_names, scope: ([fk] + caller_scope).uniq, **options)
       end
+    end
+
+    # Callback-free writes of a record in hand (§16.2). They skip the callbacks
+    # above, so each checks on its own; the fk cannot be rewritten through
+    # `update_columns` / `update_column` (always, like the `tenant_id=` writer).
+    def touch(*, **)
+      tenancy_refuse_foreign_tenant!(TenancyDable.configuration.tenant_fk, :touch) if persisted?
+      super
+    end
+
+    def update_columns(attributes)
+      fk = TenancyDable.configuration.tenant_fk
+      if persisted?
+        pair = attributes.find do |key, _|
+          name = key.to_s
+          self.class.attribute_aliases.fetch(name, name).casecmp?(fk.to_s)
+        end
+        # compared with the row's tenant: an unsaved `record.tenant = other` has
+        # already moved read_attribute
+        if pair && pair.last.to_s != tenancy_row_tenant_id(fk).to_s
+          raise TenancyDable::TenantImmutableError,
+            "#{self.class.name}##{fk} is immutable; a record's tenant cannot change after create"
+        end
+        tenancy_refuse_foreign_tenant!(fk, :update)
+      end
+      super
+    end
+
+    def delete
+      tenancy_refuse_foreign_tenant!(TenancyDable.configuration.tenant_fk, :delete) if persisted?
+      super
+    end
+
+    private
+
+    # The tenant the row holds. A record read without the fk column (a partial
+    # `select`) has no value to judge, so the row is looked up `unscoped`, which
+    # keeps the lookup out of the read guard.
+    def tenancy_row_tenant_id(fk)
+      return attribute_in_database(fk) if has_attribute?(fk)
+
+      self.class.unscoped.where(self.class.primary_key => id).pick(fk)
+    end
+
+    # The foreign-tenant refusal (§16.2, FROZEN). Callback-free writes (`touch`,
+    # `update_columns`, `delete`) call it from their overrides. Ids only in the
+    # message (invariant 6).
+    def tenancy_refuse_foreign_tenant!(fk, action)
+      return if TenancyDable::Current.tenant_scope_disabled # without_tenant
+      return unless (active_tenant = TenancyDable.current_tenant)
+
+      # A persisted record is judged by the tenant its row holds, not by an
+      # unsaved assignment; a new record by the fk it carries (blank: the
+      # auto-assign decides).
+      record_tenant_id = persisted? ? tenancy_row_tenant_id(fk) : self[fk]
+      return if record_tenant_id.blank?
+      return if record_tenant_id.to_s == active_tenant.id.to_s
+
+      where = (action == :create) ? "in" : "of"
+      raise TenancyDable::CrossTenantWriteError,
+        "refusing to #{action} #{self.class.name} #{where} tenant ##{record_tenant_id} while acting in " \
+        "tenant ##{active_tenant.id}; enter the tenant with TenancyDable.with_tenant"
     end
   end
 end

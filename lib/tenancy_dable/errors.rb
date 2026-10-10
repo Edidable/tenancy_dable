@@ -45,6 +45,26 @@ module TenancyDable
   # mid-request tenant switches.
   class TenantOverrideError < Error; end
 
+  # A read ran on a tenant-scoped relation pinned to a tenant other than the
+  # current one, or whose tenant filter was removed, while a tenant is current
+  # (v0.5.0, §16.1). Sibling of `BulkWriteError`; raised by `RelationExtension`.
+  class CrossTenantReadError < Error; end
+
+  # A create put a tenant-scoped record into a tenant other than the current one
+  # (v0.5.0, §16.2). Raised, not a validation error: the fk of a new record is a
+  # programming input, not user input.
+  class CrossTenantWriteError < Error; end
+
+  # Tenant state was written under a fiber scheduler while Active Support's
+  # isolation level is `:thread` (v0.5.0, §16.4): every fiber on the thread would
+  # share one `Current`. Governed by `config.isolation_check`.
+  class UnsafeIsolationError < Error; end
+
+  # `without_tenant` was called without a reason while
+  # `config.require_bypass_reason` is on, or with a `reason:` that is not nil, a
+  # String or a Symbol (v0.5.0, §16.5).
+  class BypassReasonError < Error; end
+
   # Invalid configuration — empty `roles`, `manager_roles` not a subset of
   # `roles`, or a blank model name (§4.1). Raised by `Configuration#validate!`.
   class ConfigurationError < Error; end

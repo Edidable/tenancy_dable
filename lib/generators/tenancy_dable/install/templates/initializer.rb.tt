@@ -28,6 +28,14 @@ TenancyDable.configure do |config|
   # closed). Accepts a boolean OR a callable evaluated per query.
   # config.require_tenant = false
 
+  # Reads. While a tenant is current, a read of a scoped model pinned to another
+  # tenant, or whose tenant filter was removed (`a.widgets` while acting in B,
+  # `unscope(where: :tenant_id)`), raises TenancyDable::CrossTenantReadError
+  # instead of returning that tenant's rows. Set false to restore the pre-0.5
+  # behaviour; enter the other tenant with `with_tenant` or wrap a deliberate
+  # cross-tenant read in `without_tenant`.
+  # config.guard_reads = true
+
   # --- Postgres row-level security (optional) ------------------------------
   # config.rls = false
   # config.rls_statement = ->(tenant) { "SET app.tenant_id = #{ActiveRecord::Base.connection.quote(tenant&.id)}" }
@@ -38,6 +46,26 @@ TenancyDable.configure do |config|
   #   :raise  raise TenancyDable::TenantOverrideError
   #   :ignore say nothing
   # config.audit_overrides = :log
+
+  # What happens when tenant state is written under a fiber scheduler while
+  # Active Support isolates `Current` per thread (every fiber would share one
+  # tenant):
+  #   :raise  (default) raise TenancyDable::UnsafeIsolationError — fix it with
+  #           `config.active_support.isolation_level = :fiber`
+  #   :warn   log it on every write and carry on
+  #   :off    say nothing
+  # config.isolation_check = :raise
+
+  # When true, `without_tenant` needs a non-blank `reason:` and raises
+  # TenancyDable::BypassReasonError without one. Every bypass is reported on the
+  # "without_tenant.tenancy_dable" notification either way.
+  # config.require_bypass_reason = false
+
+  # `rake tenancy_dable:audit` (and TenancyDable.audit) reports models that
+  # declare no tenancy: use belongs_to_tenant, or tenant_global because: "...".
+  # Namespaces it skips, and reviewed models you do not own (name => reason):
+  # config.audit_ignored_namespaces = %w[ActiveStorage ActionText ActionMailbox SolidQueue SolidCache SolidCable]
+  # config.audit_allowed = {}
 
   # --- Resolution -----------------------------------------------------------
   # When a slug matches no tenant: :raise (ActiveRecord::RecordNotFound) or

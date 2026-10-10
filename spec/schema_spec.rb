@@ -9,8 +9,16 @@ require "rails_helper"
 RSpec.describe "Combustion fixture schema" do
   let(:connection) { ActiveRecord::Base.connection }
 
-  it "boots Combustion with the four tenancy tables" do
-    expect(connection.tables).to include("tenants", "users", "memberships", "widgets")
+  it "boots Combustion with the six fixture tables" do
+    expect(connection.tables).to include(
+      "tenants", "users", "memberships", "widgets", "gadgets", "unindexed_records"
+    )
+  end
+
+  it "indexes gadgets.tenant_id and leaves unindexed_records.tenant_id without an index" do
+    expect(connection.indexes("gadgets").map(&:columns)).to include(["tenant_id"])
+    expect(connection.indexes("unindexed_records")).to be_empty
+    expect(connection.columns("unindexed_records").map(&:name)).to include("tenant_id")
   end
 
   it "enforces the slug NOT NULL + unique contract on tenants" do
@@ -52,5 +60,21 @@ RSpec.describe "Combustion fixture schema" do
     expect(membership.role).to eq("member")
     expect(widget.tenant_id).to eq(tenant.id)
     expect(widget.parent_id).to be_nil
+
+    gadget = create(:gadget, tenant: tenant)
+    expect(gadget.tenant_id).to eq(tenant.id)
+  end
+
+  it "reads widgets and gadgets through the tenant's own associations" do
+    tenant = create(:tenant)
+    widget = create(:widget, tenant: tenant)
+    gadget = create(:gadget, tenant: tenant)
+
+    TenancyDable.with_tenant(tenant) do
+      expect(tenant.widgets.to_a).to eq([widget])
+      expect(tenant.first_widget).to eq(widget)
+      expect(tenant.gadgets.to_a).to eq([gadget])
+      expect(widget.children.to_a).to be_empty
+    end
   end
 end

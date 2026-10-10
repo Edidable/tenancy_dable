@@ -38,6 +38,10 @@ Combustion.initialize! :active_record, :action_controller, :action_cable do
   # stay wrong for the rest of the suite (an order-dependent failure). Eager
   # loading makes predicate generation deterministic and order-independent.
   config.eager_load = true
+
+  # pt-BR is declared so the gem loads its pt-BR messages (§16.6); an English-only
+  # host does not get them.
+  config.i18n.available_locales = [:en, :"pt-BR"]
 end
 
 require "rspec/rails"

@@ -44,7 +44,7 @@ RSpec.describe "Red-team: tenant isolation cannot be broken" do
     end
   end
 
-  describe "invariant 2 — no cross-tenant read path (three ways, all blocked)" do
+  describe "invariant 2 — no cross-tenant read path (four ways, all blocked)" do
     it "(direct query) cannot reach another tenant's rows while acting in A" do
       mine = create(:widget, tenant: tenant_a, name: "A-1")
       secret = create(:widget, tenant: tenant_b, name: "B-secret")
@@ -52,11 +52,24 @@ RSpec.describe "Red-team: tenant isolation cannot be broken" do
       TenancyDable.with_tenant(tenant_a) do
         expect { Widget.find(secret.id) }.to raise_error(ActiveRecord::RecordNotFound)
         expect(Widget.where(id: secret.id).to_a).to be_empty
-        # even explicitly asking for B's id: the tenant filter is ANDed in
-        expect(Widget.where(tenant_id: tenant_b.id).to_a).to be_empty
+        # explicitly pinning B's id is refused outright (§16.1), not answered empty
+        expect { Widget.where(tenant_id: tenant_b.id).to_a }
+          .to raise_error(TenancyDable::CrossTenantReadError)
         expect(Widget.all.to_a).to contain_exactly(mine)
         expect(Widget.pluck(:tenant_id).uniq).to eq([tenant_a.id])
       end
+    end
+
+    it "(tenant association) cannot read another tenant's rows through the tenant's own association" do
+      create(:widget, tenant: tenant_a, name: "A-secret")
+
+      TenancyDable.with_tenant(tenant_b) do
+        expect { tenant_a.widgets.to_a }.to raise_error(TenancyDable::CrossTenantReadError)
+        expect { tenant_a.widgets.pluck(:name) }.to raise_error(TenancyDable::CrossTenantReadError)
+        expect { tenant_a.widgets.destroy_all }.to raise_error(TenancyDable::CrossTenantReadError)
+      end
+
+      expect(Widget.unscoped.where(tenant_id: tenant_a.id).count).to eq(1)
     end
 
     it "(association) cannot reference a record owned by another tenant" do
@@ -86,6 +99,46 @@ RSpec.describe "Red-team: tenant isolation cannot be broken" do
       # B's row survived every attempt, untouched
       survivor = TenancyDable.without_tenant { Widget.find_by(name: "B-keep") }
       expect(survivor).to be_present
+    end
+  end
+
+  describe "invariant 2 — read paths closed after the 0.5.0 red team (§16.1)" do
+    before do
+      create(:widget, tenant: tenant_a, name: "A-1")
+      create(:widget, tenant: tenant_b, name: "B-1")
+    end
+
+    def refused_in_b(&block)
+      expect { TenancyDable.with_tenant(tenant_b, &block) }.to raise_error(TenancyDable::CrossTenantReadError)
+    end
+
+    it "(invert_where) cannot read the other tenants by inverting the scope" do
+      refused_in_b { Widget.where(name: "B-1").invert_where.to_a }
+    end
+
+    it "(table-keyed unscope) cannot drop the tenant filter" do
+      refused_in_b { Widget.unscope(where: {widgets: :tenant_id}).to_a }
+    end
+
+    it "(stale relation) cannot read every tenant from a relation built before the tenant was entered" do
+      relation = Widget.order(:id)
+      refused_in_b { relation.to_a }
+    end
+
+    it "(cache key) cannot read another tenant's count and newest timestamp" do
+      refused_in_b { tenant_a.widgets.cache_key }
+    end
+
+    it "(subquery) cannot probe another tenant's rows through a non-scoped model" do
+      refused_in_b { Tenant.where(id: Widget.unscope(where: :tenant_id).select(:tenant_id)).pluck(:id) }
+    end
+
+    it "(update_all) cannot move the current tenant's rows into another tenant" do
+      mine = create(:widget, tenant: tenant_b, name: "B-2")
+
+      expect { TenancyDable.with_tenant(tenant_b) { Widget.update_all(tenant_id: tenant_a.id) } }
+        .to raise_error(TenancyDable::TenantImmutableError)
+      expect(TenancyDable.without_tenant { Widget.find(mine.id).tenant_id }).to eq(tenant_b.id)
     end
   end
 

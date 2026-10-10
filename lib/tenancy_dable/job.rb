@@ -39,7 +39,11 @@ module TenancyDable
       # back down (via `with_tenant`'s ensure) so a pooled worker thread never
       # leaks one job's tenant into the next. A nil id — a job enqueued with no
       # current tenant — performs untouched (fail-open, mirroring the default
-      # scope). The tenant is re-loaded by id so `perform` gets a live record.
+      # scope). The tenant is re-loaded by id so `perform` gets a live record. An
+      # id that no longer resolves (destroyed, or hidden by a host default scope)
+      # raises `TenantNotFoundError` instead: running on would read and write
+      # every tenant's rows under the fail-open default (§16.2). A host can
+      # `discard_on` it.
       #
       # The membership is reloaded and set INSIDE the `with_tenant` block: that
       # block's `ensure` restores the prior membership too (lib/tenancy_dable.rb),
@@ -53,6 +57,11 @@ module TenancyDable
           block.call
         else
           tenant = TenancyDable.configuration.tenant_class.find_by(id: tenant_id)
+          if tenant.nil?
+            raise TenancyDable::TenantNotFoundError,
+              "#{self.class.name} was enqueued in tenant ##{tenant_id}, which no longer resolves; " \
+              "refusing to run it with no tenant"
+          end
           TenancyDable.with_tenant(tenant) do
             membership_id = job.tenancy_dable_membership_id
             if membership_id

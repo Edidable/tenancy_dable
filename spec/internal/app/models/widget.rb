@@ -10,6 +10,7 @@ class Widget < ApplicationRecord
 
   belongs_to_tenant
   belongs_to :parent, class_name: "Widget", optional: true
+  has_many :children, class_name: "Widget", foreign_key: :parent_id, inverse_of: :parent
 
   validates_uniqueness_to_tenant :name
 end

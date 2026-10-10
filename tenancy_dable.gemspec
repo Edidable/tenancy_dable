@@ -25,7 +25,7 @@ Gem::Specification.new do |spec|
 
   spec.metadata["homepage_uri"] = spec.homepage
   spec.metadata["source_code_uri"] = spec.homepage
-  spec.metadata["changelog_uri"] = "#{spec.homepage}/blob/main/CHANGELOG.md"
+  spec.metadata["changelog_uri"] = "#{spec.homepage}/blob/master/CHANGELOG.md"
   spec.metadata["rubygems_mfa_required"] = "true"
 
   spec.files = Dir[
@@ -63,4 +63,6 @@ Gem::Specification.new do |spec|
   spec.add_development_dependency "combustion", "~> 1.5"
   spec.add_development_dependency "factory_bot", ">= 6.0"
   spec.add_development_dependency "sqlite3", ">= 1.6"
+  # Fiber-scheduler specs for the isolation check and the context carrier (§16.4).
+  spec.add_development_dependency "async", "~> 2.0"
 end

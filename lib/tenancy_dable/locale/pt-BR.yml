@@ -1,0 +1,6 @@
+pt-BR:
+  errors:
+    messages:
+      cross_tenant: "pertence a outro tenant"
+      last_owner: "não pode ser alterado: um tenant precisa manter ao menos um proprietário"
+      slug_format: "deve ter apenas letras minúsculas, números e hífens simples"
