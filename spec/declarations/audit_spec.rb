@@ -78,8 +78,14 @@ RSpec.describe TenancyDable::Audit do
       expect(findings.first.message).to include("shares its table with a tenant-scoped model")
     end
 
+    it "flags a global twin of an already-loaded scoped model audited on its own" do
+      twin = stub_model("GlobalWidget", table: "widgets") { tenant_global because: "x", allow_tenant_fk: true }
+
+      expect(kinds(TenancyDable.audit([twin]))).to eq([:global_with_tenant_fk])
+    end
+
     it "does not flag the same global model when no scoped model shares its table" do
-      twin = stub_model("GlobalGadget", table: "gadgets") { tenant_global because: "x", allow_tenant_fk: true }
+      twin = stub_model("GlobalUnindexed") { tenant_global because: "x", allow_tenant_fk: true }
 
       expect(TenancyDable.audit([twin])).to be_empty
     end

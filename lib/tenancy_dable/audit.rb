@@ -19,7 +19,7 @@ module TenancyDable
       fk = config.tenant_fk.to_s
 
       audited = candidates(models).reject { |model| skip?(model, config) }
-      scoped_tables = audited.select { |m| m.tenancy_declaration&.kind == :scoped }.to_set(&:table_name)
+      scoped_tables = (audited + live_models).select { |m| m.tenancy_declaration&.kind == :scoped }.to_set(&:table_name)
       findings = audited.flat_map { |model| findings_for(model, fk, scoped_tables) }
 
       findings.sort_by { |f| [f.model.name.to_s, KINDS.index(f.kind)] }.freeze
@@ -29,10 +29,16 @@ module TenancyDable
       return Array(models) unless models.nil?
 
       ::Rails.application.eager_load! if defined?(::Rails) && ::Rails.respond_to?(:application) && ::Rails.application
-      # Drops anonymous classes and stale ones (constant removed or reloaded).
-      ActiveRecord::Base.descendants.select { |m| m.name.present? && m.name.safe_constantize.equal?(m) }
+      live_models
     end
     private_class_method :candidates
+
+    # Every loaded, named model; drops anonymous classes and stale ones
+    # (constant removed or reloaded). Never eager-loads.
+    def self.live_models
+      ActiveRecord::Base.descendants.select { |m| m.name.present? && m.name.safe_constantize.equal?(m) }
+    end
+    private_class_method :live_models
 
     def self.skip?(model, config)
       name = model.name.to_s
