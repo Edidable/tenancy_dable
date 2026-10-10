@@ -83,6 +83,159 @@ RSpec.describe "TenancyDable::RelationExtension — read guard" do
     end
   end
 
+  describe "non-equality predicates on the tenant filter (acting in B)" do
+    it("refuses invert_where on a host scope") { refused { Widget.where(name: "B-1").invert_where.to_a } }
+    it("refuses Widget.invert_where") { refused { Widget.invert_where.to_a } }
+    it("refuses a count through invert_where") { refused { Widget.where(name: "B-1").invert_where.count } }
+    it("refuses unscoped.where.not(tenant_id: other)") { refused { Widget.unscoped.where.not(tenant_id: tenant_a.id).to_a } }
+
+    it "refuses a merge that brings a range on the fk" do
+      refused { Widget.all.merge(Widget.unscoped.where(tenant_id: ..tenant_a.id)).to_a }
+    end
+
+    it "refuses a merge that brings a where.not on the fk" do
+      refused { Widget.all.merge(Widget.unscoped.where.not(tenant_id: tenant_b.id)).to_a }
+    end
+
+    it "refuses unscoped.where(tenant_id: <subquery>)" do
+      refused { Widget.unscoped.where(tenant_id: Tenant.where(slug: tenant_a.slug).select(:id)).to_a }
+    end
+
+    it "keeps an explicit nil pin unpinned (not refused)" do
+      TenancyDable.with_tenant(tenant_b) do
+        expect(Widget.unscoped.where(tenant_id: nil).to_a).to eq([])
+      end
+    end
+  end
+
+  describe "table-keyed Hash unscope targets (acting in B)" do
+    it("refuses a Symbol-keyed table form") { refused { Widget.unscope(where: {widgets: :tenant_id}).to_a } }
+    it("refuses a String-keyed table form") { refused { Widget.unscope(where: {"widgets" => ["tenant_id"]}).to_a } }
+    it("refuses a list that holds a table-keyed Hash") { refused { Widget.unscope(where: [:name, {widgets: :tenant_id}]).to_a } }
+
+    it "allows a table-keyed Hash on another column" do
+      TenancyDable.with_tenant(tenant_b) do
+        expect { Widget.unscope(where: {widgets: :name}).to_a }.not_to raise_error
+      end
+    end
+  end
+
+  describe "a relation built with no tenant filter, loaded inside a tenant (acting in B)" do
+    it("refuses a relation built before any tenant was entered") do
+      relation = Widget.order(:id)
+      refused { relation.to_a }
+    end
+
+    it("refuses a count of such a relation") do
+      relation = Widget.where.not(name: nil)
+      refused { relation.count }
+    end
+
+    it("refuses pluck, ids and exists? of such a relation") do
+      relation = Widget.order(:id)
+      refused { relation.pluck(:name) }
+      refused { relation.ids }
+      refused { relation.exists? }
+    end
+
+    it("refuses a relation built inside without_tenant") do
+      relation = TenancyDable.without_tenant { Widget.order(:id) }
+      refused { relation.to_a }
+    end
+
+    it "allows a marked relation merged into one pinned to the current tenant" do
+      marked = Widget.order(:id)
+      TenancyDable.with_tenant(tenant_b) { expect(Widget.all.merge(marked).to_a).to eq([]) }
+    end
+
+    it "allows a relation built outside that is pinned to the current tenant" do
+      relation = Widget.where(tenant_id: tenant_b.id)
+      TenancyDable.with_tenant(tenant_b) { expect(relation.to_a).to eq([]) }
+    end
+
+    it "allows the same relation loaded with no tenant current" do
+      expect(Widget.order(:id).to_a).to eq([widget_a, widget_a2])
+    end
+
+    it "allows the same relation loaded inside without_tenant" do
+      relation = Widget.order(:id)
+      TenancyDable.with_tenant(tenant_b) do
+        TenancyDable.without_tenant { expect(relation.to_a).to eq([widget_a, widget_a2]) }
+      end
+    end
+
+    it "allows a relation built inside the current tenant" do
+      mine = TenancyDable.with_tenant(tenant_b) { create(:widget, tenant: tenant_b) }
+      TenancyDable.with_tenant(tenant_b) do
+        relation = Widget.order(:id)
+        expect(relation.to_a).to eq([mine])
+      end
+    end
+
+    it "does not mark Model.unscoped (documented residual)" do
+      expect(Widget.unscoped).not_to be_a(TenancyDable::BuiltWithoutTenant)
+    end
+  end
+
+  describe "collection cache keys (acting in B)" do
+    it("refuses cache_key of another tenant's association") { refused { tenant_a.widgets.cache_key } }
+    it("refuses cache_key when the tenant filter was removed") { refused { Widget.unscope(where: :tenant_id).cache_key } }
+
+    it "refuses cache_version and cache_key_with_version with collection cache versioning on" do
+      previous = Widget.collection_cache_versioning
+      Widget.collection_cache_versioning = true
+      refused { tenant_a.widgets.cache_version }
+      refused { Widget.unscope(where: :tenant_id).cache_key_with_version }
+    ensure
+      Widget.collection_cache_versioning = previous
+    end
+
+    it "allows the current tenant's own cache key" do
+      TenancyDable.with_tenant(tenant_a) { expect(tenant_a.widgets.cache_key).to start_with("widgets/") }
+    end
+  end
+
+  describe "a scoped relation compiled into another model's query (acting in B)" do
+    it "refuses a where-subquery over another tenant's rows" do
+      refused { Tenant.where(id: Widget.unscope(where: :tenant_id).select(:tenant_id)).pluck(:slug) }
+    end
+
+    it("refuses a from-subquery") { refused { Tenant.from(tenant_a.widgets.select(:id, :name), :tenants).to_a } }
+
+    it "refuses a CTE" do
+      refused { Tenant.with(w: tenant_a.widgets.select(:id)).from("w").to_a }
+    end
+
+    it "refuses to_sql of a refused relation" do
+      refused { tenant_a.widgets.to_sql }
+    end
+
+    it "allows a subquery over the current tenant's rows" do
+      TenancyDable.with_tenant(tenant_a) do
+        expect(Tenant.where(id: Widget.select(:tenant_id)).pluck(:id)).to eq([tenant_a.id])
+      end
+    end
+  end
+
+  describe "load_async with an async executor (acting in B)" do
+    before do
+      allow_any_instance_of(ActiveRecord::ConnectionAdapters::SQLite3Adapter)
+        .to receive(:async_enabled?).and_return(true)
+    end
+
+    it("refuses load_async before the query is scheduled") { refused { tenant_a.widgets.load_async } }
+    it("refuses async_count") { refused { tenant_a.widgets.async_count.value } }
+    it("refuses async_pluck") { refused { tenant_a.widgets.async_pluck(:name).value } }
+    it("refuses async_ids") { refused { tenant_a.widgets.async_ids.value } }
+    it("refuses async_sum") { refused { tenant_a.widgets.async_sum(:id).value } }
+  end
+
+  describe "a preload from a single owner (acting in B)" do
+    it("refuses Tenant.where(id: a).includes(:widgets)") do
+      refused { Tenant.where(id: tenant_a.id).includes(:widgets).to_a }
+    end
+  end
+
   describe "the message" do
     it "names the model and both tenant ids, never a record payload" do
       expect { TenancyDable.with_tenant(tenant_b) { tenant_a.widgets.to_a } }
@@ -190,6 +343,11 @@ RSpec.describe "TenancyDable::RelationExtension — read guard" do
       TenancyDable.with_tenant(tenant_a) do
         expect(tenant_a.widgets.to_a).to contain_exactly(widget_a, widget_a2)
       end
+    end
+
+    it "passes a fail-open read with no current tenant and require_tenant off (rule 3)" do
+      expect(Widget.order(:id).to_a).to eq([widget_a, widget_a2])
+      expect(Widget.count).to eq(2)
     end
 
     it "leaves the decision to the default scope with no current tenant" do

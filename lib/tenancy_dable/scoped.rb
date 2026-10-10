@@ -47,19 +47,20 @@ module TenancyDable
         # guard and the cross-tenant validation rely on.
         define_singleton_method(:tenant_scoped?) { true }
 
-        # Fail-closed default scope (invariant 1). Returning nil in the bypass /
-        # fail-open branches lets ActiveRecord fall back to the unscoped relation
-        # (`instance_exec(&scope) || default_scope`), so we never need `all`.
+        # Fail-closed default scope (invariant 1). The bypass / fail-open branches
+        # return the relation marked as built without a tenant (§16.1), so loading
+        # it later inside a tenant is refused rather than reading every tenant.
         default_scope do
           if TenancyDable::Current.tenant_scope_disabled
-            # `without_tenant` bypass — fall through to the unscoped relation.
+            extending(TenancyDable::BuiltWithoutTenant) # `without_tenant` bypass
           elsif (active_tenant = TenancyDable.current_tenant)
             where(fk => active_tenant.id) # filter before any ordering (invariant 2)
           elsif TenancyDable::Scoped.require_tenant_in_context?
             raise TenancyDable::NoTenantError,
               "#{klass.name} was queried with no current tenant while require_tenant is active"
+          else
+            extending(TenancyDable::BuiltWithoutTenant) # fail-open default
           end
-          # No current tenant + require_tenant falsey → nil → unscoped (fail-open default).
         end
 
         # Create refusal (§16.2): a new record whose fk names a tenant other than

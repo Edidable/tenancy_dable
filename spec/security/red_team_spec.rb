@@ -102,6 +102,46 @@ RSpec.describe "Red-team: tenant isolation cannot be broken" do
     end
   end
 
+  describe "invariant 2 — read paths closed after the 0.5.0 red team (§16.1)" do
+    before do
+      create(:widget, tenant: tenant_a, name: "A-1")
+      create(:widget, tenant: tenant_b, name: "B-1")
+    end
+
+    def refused_in_b(&block)
+      expect { TenancyDable.with_tenant(tenant_b, &block) }.to raise_error(TenancyDable::CrossTenantReadError)
+    end
+
+    it "(invert_where) cannot read the other tenants by inverting the scope" do
+      refused_in_b { Widget.where(name: "B-1").invert_where.to_a }
+    end
+
+    it "(table-keyed unscope) cannot drop the tenant filter" do
+      refused_in_b { Widget.unscope(where: {widgets: :tenant_id}).to_a }
+    end
+
+    it "(stale relation) cannot read every tenant from a relation built before the tenant was entered" do
+      relation = Widget.order(:id)
+      refused_in_b { relation.to_a }
+    end
+
+    it "(cache key) cannot read another tenant's count and newest timestamp" do
+      refused_in_b { tenant_a.widgets.cache_key }
+    end
+
+    it "(subquery) cannot probe another tenant's rows through a non-scoped model" do
+      refused_in_b { Tenant.where(id: Widget.unscope(where: :tenant_id).select(:tenant_id)).pluck(:id) }
+    end
+
+    it "(update_all) cannot move the current tenant's rows into another tenant" do
+      mine = create(:widget, tenant: tenant_b, name: "B-2")
+
+      expect { TenancyDable.with_tenant(tenant_b) { Widget.update_all(tenant_id: tenant_a.id) } }
+        .to raise_error(TenancyDable::TenantImmutableError)
+      expect(TenancyDable.without_tenant { Widget.find(mine.id).tenant_id }).to eq(tenant_b.id)
+    end
+  end
+
   describe "invariant 3 — tenant_id is immutable after create" do
     it "refuses every reassignment path on a persisted record" do
       widget = create(:widget, tenant: tenant_a)

@@ -129,9 +129,15 @@ RSpec.describe "Frozen public contract (PLAN.md)" do
       end
     end
 
-    %i[pluck exists? ids load_async].each do |method_name|
+    %i[pluck exists? ids load_async compute_cache_version arel].each do |method_name|
       it "overrides ##{method_name} publicly (read guard)" do
         expect(TenancyDable::RelationExtension.instance_methods).to include(method_name)
+      end
+    end
+
+    %i[compute_cache_version arel].each do |method_name|
+      it "hooks ##{method_name} with Active Record's own (public) visibility" do
+        expect(ActiveRecord::Relation.public_method_defined?(method_name)).to be(true)
       end
     end
 
@@ -140,6 +146,18 @@ RSpec.describe "Frozen public contract (PLAN.md)" do
         expect(TenancyDable::RelationExtension.private_instance_methods).to include(method_name)
         expect(TenancyDable::RelationExtension.instance_methods).not_to include(method_name)
       end
+    end
+  end
+
+  describe "BuiltWithoutTenant marker (§16.1)" do
+    it "is an empty module" do
+      expect(TenancyDable::BuiltWithoutTenant).to be_a(Module)
+      expect(TenancyDable::BuiltWithoutTenant.instance_methods).to be_empty
+    end
+
+    it "marks a relation built with no current tenant and not one built in a tenant" do
+      expect(Widget.all).to be_a(TenancyDable::BuiltWithoutTenant)
+      expect(TenancyDable.with_tenant(create(:tenant)) { Widget.all }).not_to be_a(TenancyDable::BuiltWithoutTenant)
     end
   end
 

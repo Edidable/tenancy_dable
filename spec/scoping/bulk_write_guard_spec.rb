@@ -100,6 +100,43 @@ RSpec.describe "TenancyDable::RelationExtension — bulk-write guard" do
     end
   end
 
+  context "update_all that rewrites the tenant fk (invariant 3)" do
+    let!(:mine) { create(:widget, tenant: tenant_b, name: "B-1") }
+
+    def tenant_of(record)
+      TenancyDable.without_tenant { Widget.find(record.id).tenant_id }
+    end
+
+    it "raises TenantImmutableError for a Symbol key and moves nothing" do
+      expect { TenancyDable.with_tenant(tenant_b) { Widget.where(id: mine.id).update_all(tenant_id: tenant_a.id) } }
+        .to raise_error(TenancyDable::TenantImmutableError, /Widget#tenant_id is immutable/)
+      expect(tenant_of(mine)).to eq(tenant_b.id)
+    end
+
+    it "raises TenantImmutableError for a String key" do
+      expect { TenancyDable.with_tenant(tenant_b) { Widget.update_all("tenant_id" => tenant_a.id) } }
+        .to raise_error(TenancyDable::TenantImmutableError)
+      expect(tenant_of(mine)).to eq(tenant_b.id)
+    end
+
+    it "raises even when the value is the current tenant's own id" do
+      expect { TenancyDable.with_tenant(tenant_b) { Widget.update_all(tenant_id: tenant_b.id) } }
+        .to raise_error(TenancyDable::TenantImmutableError)
+    end
+
+    it "allows the rewrite inside without_tenant" do
+      TenancyDable.with_tenant(tenant_b) do
+        TenancyDable.without_tenant { Widget.where(id: mine.id).update_all(tenant_id: tenant_a.id) }
+      end
+      expect(tenant_of(mine)).to eq(tenant_a.id)
+    end
+
+    it "allows an update_all on other columns" do
+      TenancyDable.with_tenant(tenant_b) { Widget.update_all(name: "renamed") }
+      expect(mine.reload.name).to eq("renamed")
+    end
+  end
+
   it "leaves non-tenant-scoped models untouched by the guard" do
     # Tenant is not tenant-scoped (it IS the tenant), so its bulk writes pass
     # straight through even with no current tenant.
