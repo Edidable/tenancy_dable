@@ -59,6 +59,34 @@ RSpec.describe "TenancyDable::RelationExtension — bulk-write guard" do
     end
   end
 
+  context "with the tenant filter removed or widened (shared classifier, §16.1)" do
+    it "refuses a bulk write after unscope(where: :tenant_id)" do
+      create(:widget, tenant: tenant_b)
+      TenancyDable.current_tenant = tenant_a
+
+      expect { Widget.unscope(where: :tenant_id).delete_all }
+        .to raise_error(TenancyDable::BulkWriteError)
+      expect(Widget.unscoped.count).to eq(1)
+    end
+
+    it "refuses a bulk write on a multi-tenant IN list that contains the current tenant" do
+      create(:widget, tenant: tenant_b)
+      TenancyDable.current_tenant = tenant_a
+
+      expect { Widget.where(tenant_id: [tenant_a.id, tenant_b.id]).delete_all }
+        .to raise_error(TenancyDable::BulkWriteError)
+      expect(Widget.unscoped.count).to eq(1)
+    end
+
+    it "allows a bulk write after rewhere(tenant_id: current)" do
+      mine = create(:widget, tenant: tenant_a)
+      TenancyDable.current_tenant = tenant_a
+
+      expect { Widget.rewhere(tenant_id: tenant_a.id).update_all(name: "renamed") }.not_to raise_error
+      expect(mine.reload.name).to eq("renamed")
+    end
+  end
+
   context "inside without_tenant" do
     it "allows an otherwise-guarded bulk write across all tenants" do
       create(:widget, tenant: tenant_a)

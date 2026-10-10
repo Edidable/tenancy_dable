@@ -44,7 +44,7 @@ RSpec.describe "Red-team: tenant isolation cannot be broken" do
     end
   end
 
-  describe "invariant 2 — no cross-tenant read path (three ways, all blocked)" do
+  describe "invariant 2 — no cross-tenant read path (four ways, all blocked)" do
     it "(direct query) cannot reach another tenant's rows while acting in A" do
       mine = create(:widget, tenant: tenant_a, name: "A-1")
       secret = create(:widget, tenant: tenant_b, name: "B-secret")
@@ -52,11 +52,24 @@ RSpec.describe "Red-team: tenant isolation cannot be broken" do
       TenancyDable.with_tenant(tenant_a) do
         expect { Widget.find(secret.id) }.to raise_error(ActiveRecord::RecordNotFound)
         expect(Widget.where(id: secret.id).to_a).to be_empty
-        # even explicitly asking for B's id: the tenant filter is ANDed in
-        expect(Widget.where(tenant_id: tenant_b.id).to_a).to be_empty
+        # explicitly pinning B's id is refused outright (§16.1), not answered empty
+        expect { Widget.where(tenant_id: tenant_b.id).to_a }
+          .to raise_error(TenancyDable::CrossTenantReadError)
         expect(Widget.all.to_a).to contain_exactly(mine)
         expect(Widget.pluck(:tenant_id).uniq).to eq([tenant_a.id])
       end
+    end
+
+    it "(tenant association) cannot read another tenant's rows through the tenant's own association" do
+      create(:widget, tenant: tenant_a, name: "A-secret")
+
+      TenancyDable.with_tenant(tenant_b) do
+        expect { tenant_a.widgets.to_a }.to raise_error(TenancyDable::CrossTenantReadError)
+        expect { tenant_a.widgets.pluck(:name) }.to raise_error(TenancyDable::CrossTenantReadError)
+        expect { tenant_a.widgets.destroy_all }.to raise_error(TenancyDable::CrossTenantReadError)
+      end
+
+      expect(Widget.unscoped.where(tenant_id: tenant_a.id).count).to eq(1)
     end
 
     it "(association) cannot reference a record owned by another tenant" do
