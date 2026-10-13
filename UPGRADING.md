@@ -22,7 +22,7 @@ public contract and security invariants, see [DESIGN.md](DESIGN.md).
 
 ```ruby
 # Gemfile
-gem "tenancy_dable", "~> 0.1.0"
+gem "tenancy_dable", git: "https://github.com/edidable/tenancy_dable", tag: "vX.Y.Z" # the release tag, e.g. v0.5.0
 ```
 
 ```bash
@@ -95,19 +95,21 @@ classes, and the documented isolation semantics.
 ### Pre-1.0 caveat
 
 While the gem is `0.x`, **a `0.MINOR.0` bump may carry breaking changes** (semver
-§4 lets `0.x` move fast before the surface stabilizes). So pin conservatively until
-`1.0`:
+§4 lets `0.x` move fast before the surface stabilizes). The gem is consumed from git,
+pinned by tag, so pin a tag until `1.0` and review each new minor by hand before
+bumping it:
 
 ```ruby
-gem "tenancy_dable", "~> 0.1.0"   # auto-accept 0.1.x patches; review 0.2.0 by hand
+gem "tenancy_dable", git: "https://github.com/edidable/tenancy_dable", tag: "vX.Y.Z"   # bump the tag by hand; read the CHANGELOG first
 ```
 
-After `1.0`, `~> 1.0` is safe for routine updates (accepts every backward-compatible
-`1.x`, locks the major).
+After `1.0`, moving the tag within the same major is safe for routine updates (every
+backward-compatible `1.x`); a new major is read first.
 
 ### Bumping a single project
 
 ```bash
+# first bump the tag: in the Gemfile
 bundle update tenancy_dable
 bin/rails generate tenancy_dable:install   # idempotent — re-run to pick up NEW templates; existing files are skipped
 bin/rails db:migrate                       # if the bump shipped new migrations
@@ -159,7 +161,7 @@ shape the skeleton already has.
 **1. Add the gem and run the generator.**
 
 ```ruby
-gem "tenancy_dable", "~> 0.1.0"
+gem "tenancy_dable", git: "https://github.com/edidable/tenancy_dable", tag: "vX.Y.Z" # the release tag, e.g. v0.5.0
 ```
 
 ```bash

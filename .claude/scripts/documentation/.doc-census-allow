@@ -1,0 +1,20 @@
+# Lines doc_census.rb skips.
+#
+# Format: one SUBSTRING per line; a doc line that contains it is not reported.
+# Blank lines and lines starting with `#` are ignored. Keep entries grouped under
+# a `# ---` comment that says WHY.
+#
+# An entry is only for a number that is a CONTRACT (changing it takes a decision
+# and a spec welds it), a version a sentence depends on (a workaround pinned to a
+# named release, with its row in docs/upstream.md), a quoted literal that only
+# looks like a count, or a count the same sentence enumerates. Never allow-list a
+# number that is merely true today: replace it with the source that answers it
+# (see .claude/rules/docs.md).
+
+# --- a version the sentence depends on: Rails 7.1 does not support Ruby 3.4,
+# which is why the CI matrix excludes that cell and a local 7.1 run needs an
+# older Ruby
+Rails 7.1 needs a Ruby below 3.4
+Rails 7.1 predates Ruby 3.4
+the Ruby 3.4 and Rails 7.1 cell excluded
+

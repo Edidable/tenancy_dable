@@ -1,0 +1,16 @@
+# Known-intentional doc references that deliberately do not resolve in-repo.
+# check_doc_refs.rb skips every line listed here.
+#
+# Format: one backticked reference per line, exactly as the doc writes it
+# (`Foo::Bar`, no backticks, no trailing text). Blank lines and lines starting
+# with `#` are ignored. Keep entries grouped under a `# ---` comment that says WHY
+# (an illustrative example class in a pattern doc, a removed name a decision
+# records on purpose, a gem class named by a short alias). Anything not listed
+# here that fails the check is real drift: fix the doc or the code instead.
+# `ruby .claude/scripts/documentation/check_doc_refs.rb --unused` lists entries
+# no doc names any more, so delete those.
+
+# --- an illustrative host policy: the docs show the conventional shape of a
+# concrete policy's nested scope; the class is a host's, never defined in the
+# gem (the spec builds an anonymous policy class)
+WidgetPolicy::Scope

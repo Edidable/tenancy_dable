@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Run the suite, or the given rspec arguments, on another Rails line without
+# touching the default lockfile. It writes its own Gemfile (and lockfile) under
+# tmp/matrix/, resolves it, and runs rspec with that BUNDLE_GEMFILE.
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: rails-matrix <X.Y> [rspec arguments...]
+
+  rails-matrix 7.2                       the whole suite on Rails 7.2
+  rails-matrix 7.1 spec/scoping          given paths only
+  rails-matrix 7.2 tmp/v060/redteam/ -I spec --default-path spec
+                                         throwaway probes under tmp/
+
+Environment:
+  MATRIX_RUBY=<version>  run with another Ruby. Sets ASDF_RUBY_VERSION,
+                         RBENV_VERSION and MISE_RUBY_VERSION, so asdf, rbenv
+                         and mise all pick it up. Rails 7.1 needs a Ruby
+                         below 3.4.
+  MATRIX_DIR=<dir>       where the Gemfiles live (default: tmp/matrix, under
+                         the checkout root; gitignored).
+
+The run shares the checkout's harness database with any other rspec process
+in the same checkout: never run two at once in one checkout.
+USAGE
+}
+
+if [[ $# -lt 1 || "$1" == "-h" || "$1" == "--help" ]]; then
+  usage
+  [[ $# -lt 1 ]] && exit 64
+  exit 0
+fi
+
+line="$1"
+shift
+if [[ ! "$line" =~ ^[0-9]+\.[0-9]+$ ]]; then
+  echo "rails-matrix: expected a Rails line like 7.1 or 8.0, got '$line'" >&2
+  exit 64
+fi
+
+root="$(git rev-parse --show-toplevel)"
+cd "$root"
+
+matrix_dir="${MATRIX_DIR:-tmp/matrix}"
+[[ "$matrix_dir" = /* ]] || matrix_dir="$root/$matrix_dir"
+mkdir -p "$matrix_dir"
+gemfile="$matrix_dir/Gemfile.rails${line//./}"
+gemspec_path="$(ruby -e 'require "pathname"; puts Pathname.new(ARGV[0]).relative_path_from(Pathname.new(ARGV[1]))' "$root" "$matrix_dir")"
+
+cat > "$gemfile" <<GEMFILE
+# frozen_string_literal: true
+
+# Written by .claude/skills/workflow/scripts/rails-matrix; never committed.
+source "https://rubygems.org"
+
+gemspec path: "$gemspec_path"
+gem "rails", "~> ${line}.0"
+GEMFILE
+
+if [[ -n "${MATRIX_RUBY:-}" ]]; then
+  export ASDF_RUBY_VERSION="$MATRIX_RUBY" RBENV_VERSION="$MATRIX_RUBY" MISE_RUBY_VERSION="$MATRIX_RUBY"
+fi
+export BUNDLE_GEMFILE="$gemfile"
+
+if ! bundle check >/dev/null 2>&1; then
+  bundle install --quiet
+fi
+
+bundle exec ruby -e 'require "rails"; puts "rails-matrix: Ruby #{RUBY_VERSION}, Rails #{Rails.version}"'
+exec bundle exec rspec "$@"
