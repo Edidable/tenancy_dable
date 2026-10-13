@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(.claude/**)",
+      "Edit(.claude/rules/**)",
+      "Write(.claude/rules/**)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|MultiEdit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ruby \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/check_docs.rb"
+          },
+          {
+            "type": "command",
+            "command": "ruby \"$CLAUDE_PROJECT_DIR\"/.claude/scripts/documentation/check_doc_refs.rb"
+          }
+        ]
+      }
+    ]
+  }
+}

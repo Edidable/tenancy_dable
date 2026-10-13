@@ -20,3 +20,8 @@
 
 .DS_Store
 .idea
+# Per-developer local agent settings
+/.claude/settings.local.json
+
+# Proposal files a consumer hands over: inputs to a release run, never published
+/IMPROVEMENT_PROPOSALS*.md

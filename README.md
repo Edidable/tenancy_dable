@@ -37,7 +37,7 @@ ActiveJob and Action Cable are **optional** — needed only if you opt into [ten
 
 ```ruby
 # Gemfile
-gem "tenancy_dable", "~> 0.1.0"
+gem "tenancy_dable", git: "https://github.com/edidable/tenancy_dable", tag: "vX.Y.Z" # the release tag, e.g. v0.5.0
 ```
 
 ```bash
